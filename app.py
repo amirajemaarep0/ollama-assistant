@@ -29,7 +29,7 @@ session_defaults = {
     "chat_history": [],
     "repo_path": "",
     "ollama_base_url": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
-    "ollama_model": os.environ.get("OLLAMA_MODEL", "llama3"),
+    "ollama_model": os.environ.get("OLLAMA_MODEL", "llama3"),  # must be one of OLLAMA_MODELS
     "ollama_num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "4096")),
     "indexed_mode": None,
     "index_meta": None,
@@ -43,6 +43,9 @@ session_defaults = {
 for key, value in session_defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
+
+# Models named in the project specification ("running models like Llama 3 or Mistral").
+OLLAMA_MODELS = ("llama3", "mistral")
 
 INDEX_LABELS = (
     "Python (.py) only",
@@ -108,11 +111,17 @@ with st.sidebar:
         value=st.session_state.ollama_base_url,
         help="Default: http://localhost:11434"
     ).strip().rstrip("/")
-    st.session_state.ollama_model = st.text_input(
-        "Ollama model name",
-        value=st.session_state.ollama_model,
-        help="e.g., llama3, mistral, qwen3:1.7b (smaller/faster on 8 GB RAM)"
-    ).strip()
+    # The specification names Llama 3 and Mistral as the models to run on Ollama,
+    # so those are the only two offered.
+    model_index = OLLAMA_MODELS.index(st.session_state.ollama_model) if (
+        st.session_state.ollama_model in OLLAMA_MODELS
+    ) else 0
+    st.session_state.ollama_model = st.selectbox(
+        "Ollama model",
+        OLLAMA_MODELS,
+        index=model_index,
+        help="Pull it first with `ollama pull <model>`.",
+    )
     st.session_state.ollama_num_ctx = st.slider(
         "Context window (tokens)",
         1024,
@@ -361,7 +370,7 @@ if "current_prompt" in st.session_state and st.session_state.current_prompt:
                         "Your GPU/RAM cannot fit this model at the current context size.\n\n"
                         "**Try:**\n"
                         "1. Lower **Context window** in the sidebar to **2048** or **4096**\n"
-                        "2. Use a smaller model (e.g. `qwen3:1.7b`)\n"
+                        "2. Switch the **Ollama model** to `mistral`\n"
                         "3. Close other apps, then restart Ollama\n"
                         "4. Reduce **Snippets to retrieve** and **Max characters per snippet**"
                     )

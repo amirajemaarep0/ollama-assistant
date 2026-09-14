@@ -32,12 +32,12 @@ pip install -r requirements.txt
 ollama pull llama3
 ```
 
-Other options, smallest to largest:
+The app offers the two models named in the project specification. Pull whichever
+you plan to use:
 
 ```bash
-ollama pull qwen2.5:1.5b    # ~1 GB, very fast, good on CPU-only machines
-ollama pull mistral         # ~4 GB
 ollama pull llama3          # ~4.7 GB, best answers
+ollama pull mistral         # ~4.1 GB, lighter and faster
 ```
 
 ### 3. Run the app
@@ -78,7 +78,7 @@ Run `ollama pull <model>` with the name shown in the sidebar.
 
 ### Out of memory when loading the model
 - Lower **Context window** to 2048.
-- Use a smaller model: `ollama pull qwen2.5:1.5b`.
+- Switch the **Ollama model** to `mistral` (lighter than `llama3`).
 - Reduce **Snippets to retrieve** and **Max characters per snippet**.
 - Close other applications and restart Ollama.
 
