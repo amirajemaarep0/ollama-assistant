@@ -1,0 +1,22 @@
+streamlit
+langchain
+langchain-community
+langchain-huggingface
+openai-whisper
+sounddevice
+numpy
+scipy
+chromadb
+pypdf
+sentence-transformers
+pytest
+torch
+torchaudio
+ollama
+# LLaMA.cpp: pip install llama-cpp-python
+# GPT4All: pip install gpt4all
+# Hugging Face: pip install transformers bitsandbytes
+# LM Studio: pip install requests (already included)
+
+reportlab
+requests
