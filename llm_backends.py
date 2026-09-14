@@ -7,11 +7,18 @@ import os
 
 class LLMBackend:
     """Base class for LLM backends."""
-    
-    def __init__(self, model_name: str, **kwargs):
+
+    def __init__(self, model_name: str, system: str | None = None, **kwargs):
         self.model_name = model_name
+        self.system = system
         self.kwargs = kwargs
         self.model = None
+
+    def _apply_system(self, prompt: str) -> str:
+        """Prepend the system prompt for backends with no dedicated system field."""
+        if self.system:
+            return self.system + "\n\n" + prompt
+        return prompt
     
     def query(self, prompt: str, max_tokens: int = 512) -> str:
         """Query the model and return response."""
@@ -30,22 +37,23 @@ class OllamaBackend(LLMBackend):
         model_name: str,
         base_url: str = "http://localhost:11434",
         num_ctx: int = 4096,
+        temperature: float = 0.7,
         **kwargs,
     ):
         super().__init__(model_name, **kwargs)
-        self.base_url = base_url
+        self.base_url = base_url.rstrip("/")
         self.num_ctx = num_ctx
+        self.temperature = temperature
         self.client = None
-    
+
     def _init_client(self):
         try:
             import ollama
-            if hasattr(ollama, "Ollama"):
-                self.client = ollama.Ollama(base_url=self.base_url)
-            else:
-                self.client = ollama
         except ImportError:
             raise ImportError("ollama package not installed. Install with: pip install ollama")
+        # ollama exposes Client(host=...); there is no `ollama.Ollama`. Using the bare
+        # module would silently ignore base_url and always hit localhost:11434.
+        self.client = ollama.Client(host=self.base_url)
     
     def query(self, prompt: str, max_tokens: int = 512) -> str:
         if self.client is None:
@@ -55,35 +63,47 @@ class OllamaBackend(LLMBackend):
             response = self.client.generate(
                 model=self.model_name,
                 prompt=prompt,
+                system=self.system or None,
                 stream=False,
                 options={
                     "num_predict": max_tokens,
                     "num_ctx": self.num_ctx,
-                    "temperature": 0.7,
+                    "temperature": self.temperature,
                 },
             )
-            return response.get("response", "").strip()
+            return (response.get("response") or "").strip()
         except Exception as e:
             raise ConnectionError(f"Failed to query Ollama at {self.base_url}: {e}")
     
     def health_check(self) -> Tuple[bool, str]:
-        if self.client is None:
-            self._init_client()
-        
         try:
             import requests
             response = requests.get(f"{self.base_url}/api/tags", timeout=2)
-            return response.status_code == 200, "✅ Ollama is running"
+            if response.status_code != 200:
+                return False, f"❌ Ollama returned HTTP {response.status_code} at {self.base_url}"
+            tags = response.json().get("models", [])
+            names = {m.get("name", "") for m in tags}
+            if self.model_name and not any(
+                n == self.model_name or n.split(":")[0] == self.model_name.split(":")[0]
+                for n in names
+            ):
+                available = ", ".join(sorted(n for n in names if n)) or "none"
+                return False, (
+                    f"⚠️ Ollama is running but model '{self.model_name}' is not pulled. "
+                    f"Run `ollama pull {self.model_name}`. Available: {available}"
+                )
+            return True, f"✅ Ollama is running at {self.base_url} with '{self.model_name}'"
         except Exception as e:
-            return False, f"❌ Ollama unreachable: {e}"
+            return False, f"❌ Ollama unreachable at {self.base_url}: {e}"
 
 
 class LlamaCppBackend(LLMBackend):
     """LLaMA.cpp backend (GGUF models on CPU/GPU)."""
     
-    def __init__(self, model_name: str, **kwargs):
+    def __init__(self, model_name: str, n_ctx: int = 4096, **kwargs):
         super().__init__(model_name, **kwargs)
         self.n_gpu_layers = kwargs.get("n_gpu_layers", -1)  # -1 = all on GPU if available
+        self.n_ctx = n_ctx
     
     def _init_model(self):
         try:
@@ -95,7 +115,7 @@ class LlamaCppBackend(LLMBackend):
             self.model = Llama(
                 model_path=self.model_name,
                 n_gpu_layers=self.n_gpu_layers,
-                n_ctx=2048,
+                n_ctx=self.n_ctx,
                 verbose=False
             )
         except ImportError:
@@ -109,7 +129,7 @@ class LlamaCppBackend(LLMBackend):
         
         try:
             response = self.model(
-                prompt,
+                self._apply_system(prompt),
                 max_tokens=max_tokens,
                 temperature=0.7,
                 top_p=0.95
@@ -146,7 +166,7 @@ class GPT4AllBackend(LLMBackend):
             self._init_model()
         
         try:
-            response = self.model.generate(prompt, max_tokens=max_tokens, temp=0.7)
+            response = self.model.generate(self._apply_system(prompt), max_tokens=max_tokens, temp=0.7)
             return response.strip()
         except Exception as e:
             raise RuntimeError(f"GPT4All query failed: {e}")
@@ -203,8 +223,17 @@ class HuggingFaceBackend(LLMBackend):
             self._init_model()
         
         try:
-            output = self.model(prompt, max_length=max_tokens, do_sample=True, temperature=0.7)
-            return output[0]["generated_text"][len(prompt):].strip()
+            full_prompt = self._apply_system(prompt)
+            # max_new_tokens, not max_length: max_length counts the prompt too, so a long
+            # RAG context would leave zero budget for the answer.
+            output = self.model(
+                full_prompt,
+                max_new_tokens=max_tokens,
+                do_sample=True,
+                temperature=0.7,
+                return_full_text=False,
+            )
+            return output[0]["generated_text"].strip()
         except Exception as e:
             raise RuntimeError(f"HF query failed: {e}")
     
@@ -222,20 +251,29 @@ class LMStudioBackend(LLMBackend):
     
     def __init__(self, model_name: str, base_url: str = "http://localhost:1234", **kwargs):
         super().__init__(model_name, **kwargs)
-        self.base_url = base_url
-    
+        self.base_url = base_url.rstrip("/")
+        self._session = None
+
+    def _get_session(self):
+        if self._session is None:
+            import requests
+            self._session = requests.Session()
+        return self._session
+
     def query(self, prompt: str, max_tokens: int = 512) -> str:
         try:
-            import requests
-            
-            response = requests.post(
+            payload = {
+                "prompt": self._apply_system(prompt),
+                "max_tokens": max_tokens,
+                "temperature": 0.7,
+                "top_p": 0.95,
+            }
+            if self.model_name and self.model_name != "default":
+                payload["model"] = self.model_name
+
+            response = self._get_session().post(
                 f"{self.base_url}/v1/completions",
-                json={
-                    "prompt": prompt,
-                    "max_tokens": max_tokens,
-                    "temperature": 0.7,
-                    "top_p": 0.95
-                },
+                json=payload,
                 timeout=60
             )
             response.raise_for_status()
@@ -255,6 +293,7 @@ class LMStudioBackend(LLMBackend):
 
 
 def get_backend(backend_type: str, model_name: str, **kwargs) -> LLMBackend:
+    # `system` is accepted by every backend via LLMBackend.__init__.
     """Factory function to get LLM backend."""
     backends = {
         "ollama": OllamaBackend,

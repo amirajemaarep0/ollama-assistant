@@ -2,11 +2,12 @@ import os
 import re
 from typing import Any, Literal
 
-from langchain_community.llms import Ollama
 from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+
+from llm_backends import OllamaBackend
 
 IndexMode = Literal["python", "documents", "both"]
 
@@ -16,9 +17,20 @@ def _path_should_skip(file_path: str) -> bool:
     for bad in (
         "\\venv\\",
         "\\.venv\\",
+        "\\env\\",
         "\\node_modules\\",
         "\\.git\\",
         "\\__pycache__\\",
+        "\\.pytest_cache\\",
+        "\\.mypy_cache\\",
+        "\\.ruff_cache\\",
+        "\\site-packages\\",
+        "\\.idea\\",
+        "\\.vscode\\",
+        "\\.cursor\\",
+        "\\build\\",
+        "\\dist\\",
+        "\\.ipynb_checkpoints\\",
     ):
         if bad in norm:
             return True
@@ -41,6 +53,24 @@ def scan_project_files(repo_path: str) -> list[str]:
                 continue
             found.append(os.path.relpath(full, root).replace("\\", "/"))
     return sorted(found)
+
+
+def _iter_project_files(root: str, extensions: set[str]):
+    """Yield absolute paths under root whose extension is in `extensions`.
+
+    Prunes venv/.git/node_modules/__pycache__ *during* the walk. The previous
+    implementation globbed `**/*.ext` per pattern and filtered afterwards, which
+    descended into .venv (~20k files here) once per pattern before discarding it.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if not _path_should_skip(os.path.join(dirpath, d) + os.sep)
+        ]
+        for name in sorted(filenames):
+            if os.path.splitext(name)[1].lower() in extensions:
+                yield os.path.join(dirpath, name)
 
 
 _LISTING_PATTERNS = re.compile(
@@ -282,8 +312,9 @@ def format_file_inventory_answer(meta: dict[str, Any]) -> str:
 
     if all_files:
         lines.append("### All files")
+        indexed_set = set(indexed)
         for path in all_files:
-            tag = " *(indexed)*" if path in set(indexed) else ""
+            tag = " *(indexed)*" if path in indexed_set else ""
             lines.append(f"- `{path}`{tag}")
     else:
         lines.append("_No files found under this path._")
@@ -320,6 +351,19 @@ def inventory_context_for_prompt(meta: dict[str, Any] | None, max_listed: int = 
     return "\n".join(lines)
 
 
+_EMBEDDINGS_CACHE: dict[tuple[str, str], Any] = {}
+
+
+def get_embeddings(model_name: str = "all-MiniLM-L6-v2", device: str = "cpu"):
+    """Load the embedding model once per process; it costs seconds to construct."""
+    key = (model_name, device)
+    if key not in _EMBEDDINGS_CACHE:
+        _EMBEDDINGS_CACHE[key] = HuggingFaceEmbeddings(
+            model_name=model_name, model_kwargs={"device": device}
+        )
+    return _EMBEDDINGS_CACHE[key]
+
+
 def build_vectorstore(repo_path: str, index_mode: IndexMode = "python"):
     """
     index_mode:
@@ -331,7 +375,6 @@ def build_vectorstore(repo_path: str, index_mode: IndexMode = "python"):
         raise ValueError(f"Invalid directory path: {repo_path}")
 
     from langchain_community.document_loaders import TextLoader, PyPDFLoader
-    import glob
 
     documents = []
     indexed_sources: set[str] = set()
@@ -362,24 +405,17 @@ def build_vectorstore(repo_path: str, index_mode: IndexMode = "python"):
     want_py = index_mode in ("python", "both")
     want_docs = index_mode in ("documents", "both")
 
-    if want_docs:
-        doc_patterns = ("**/*.md", "**/*.txt", "**/*.rst", "**/*.pdf")
-        print(f"Loading documents from {repo_path} ({', '.join(doc_patterns)})...")
-        for pattern in doc_patterns:
-            for file_path in glob.glob(os.path.join(repo_path, pattern), recursive=True):
-                if _path_should_skip(file_path):
-                    continue
-                ext = os.path.splitext(file_path)[1].lower()
-                if ext == ".pdf":
-                    load_pdf_file(file_path)
-                else:
-                    load_text_file(file_path)
-
+    wanted_exts: set[str] = set()
     if want_py:
-        print(f"Loading Python files from {repo_path}...")
-        for file_path in glob.glob(os.path.join(repo_path, "**", "*.py"), recursive=True):
-            if _path_should_skip(file_path):
-                continue
+        wanted_exts.add(".py")
+    if want_docs:
+        wanted_exts.update((".md", ".txt", ".rst", ".pdf"))
+
+    print(f"Scanning {repo_path} for {', '.join(sorted(wanted_exts))}...")
+    for file_path in _iter_project_files(root_abs, wanted_exts):
+        if os.path.splitext(file_path)[1].lower() == ".pdf":
+            load_pdf_file(file_path)
+        else:
             load_text_file(file_path)
 
     if not documents:
@@ -400,7 +436,7 @@ def build_vectorstore(repo_path: str, index_mode: IndexMode = "python"):
     texts = splitter.split_documents(documents)
 
     print(f"Split into {len(texts)} chunks. Creating embeddings and vector store...")
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2", model_kwargs={"device": "cpu"})
+    embeddings = get_embeddings()
     db = Chroma.from_documents(texts, embeddings)
     print("Vector store created successfully.")
     meta = build_index_meta(repo_path, index_mode, sorted(indexed_sources))
@@ -496,26 +532,27 @@ def query_llm(
 
     effective_root = (project_root or (index_meta or {}).get("root") or "").strip()
 
+    system_prompt = _system_prompt_for_mode(index_mode)
+
     backend_obj = backend
     if backend_obj is None:
         resolved_base = (base_url or os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
         resolved_model = model_name or os.environ.get("OLLAMA_MODEL", "llama3")
-        backend_obj = Ollama(
-            model=resolved_model,
+        backend_obj = OllamaBackend(
+            resolved_model,
             base_url=resolved_base,
-            num_predict=num_predict,
             num_ctx=num_ctx,
             temperature=temperature,
-            keep_alive="5m",
-            system=_system_prompt_for_mode(index_mode),
+            system=system_prompt,
         )
     else:
-        system_prompt = _system_prompt_for_mode(index_mode)
-        if hasattr(backend_obj, "system"):
-            try:
-                backend_obj.system = system_prompt
-            except Exception:
-                pass
+        # Previously guarded by hasattr(backend_obj, "system"), which is False for every
+        # llm_backends object -- so the mode-specific grounding rules were silently
+        # dropped on the path the app actually uses.
+        try:
+            backend_obj.system = system_prompt
+        except (AttributeError, TypeError):
+            pass
 
     direct_file_answer = try_answer_file_content_question(
         question,

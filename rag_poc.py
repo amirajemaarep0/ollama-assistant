@@ -1,25 +1,28 @@
-from langchain_community.llms import Ollama
-from langchain_core.prompts import PromptTemplate
+"""Phase 1 proof of concept: ask a local Ollama model about a source file."""
+import sys
 
-def test_rag():
-    llm = Ollama(model="llama3")
-    
-    with open("rag_poc.py", "r") as f:
+from llm_backends import OllamaBackend
+
+
+def test_rag(path: str = "rag_poc.py", model: str = "llama3"):
+    with open(path, encoding="utf-8") as f:
         code_content = f.read()
 
-    template = """
-    You are an AI coding assistant. Explain what the following Python code does:
-    
-    {code}
-    """
-    
-    prompt = PromptTemplate.from_template(template)
-    chain = prompt | llm
-    
-    print("Sending query to Llama 3...")
-    response = chain.invoke({"code": code_content})
+    prompt = (
+        "You are an AI coding assistant. Explain what the following Python code does:\n\n"
+        f"{code_content}"
+    )
+
+    backend = OllamaBackend(model)
+    healthy, message = backend.health_check()
+    print(message)
+    if not healthy:
+        return
+
+    print(f"Sending query to {model}...")
     print("\n--- Response ---")
-    print(response)
+    print(backend.query(prompt))
+
 
 if __name__ == "__main__":
-    test_rag()
+    test_rag(*sys.argv[1:])

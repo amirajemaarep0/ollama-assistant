@@ -1,10 +1,15 @@
-import streamlit as st
 import os
 import time
 from pathlib import Path
-from voice_stt import record_audio, transcribe_audio
-from rag_backend import build_vectorstore, query_llm
+
+import streamlit as st
+
 from llm_backends import get_backend
+
+# voice_stt pulls in torch + whisper (~4s) and rag_backend pulls in transformers via
+# langchain (~13s). Importing them at module scope blocked the first paint for ~18s
+# even when the user never touched voice input. They are imported on first use instead;
+# sys.modules keeps them warm for later reruns.
 
 st.set_page_config(
     page_title="Local Voice AI Dev Assistant",
@@ -55,9 +60,63 @@ INDEX_LABEL_TO_MODE = {
     INDEX_LABELS[2]: "both",
 }
 
+def backend_config() -> dict:
+    """Current backend settings, as kwargs for get_backend()."""
+    kind = st.session_state.llm_backend
+    if kind == "ollama":
+        return {
+            "backend_type": "ollama",
+            "model_name": st.session_state.ollama_model,
+            "base_url": st.session_state.ollama_base_url,
+            "num_ctx": st.session_state.ollama_num_ctx,
+        }
+    if kind == "llama_cpp":
+        return {
+            "backend_type": "llama_cpp",
+            "model_name": st.session_state.llama_cpp_path,
+            "n_gpu_layers": -1 if st.session_state.get("use_gpu_layers", True) else 0,
+        }
+    if kind == "gpt4all":
+        return {"backend_type": "gpt4all", "model_name": st.session_state.gpt4all_model}
+    if kind == "huggingface":
+        return {
+            "backend_type": "huggingface",
+            "model_name": st.session_state.huggingface_model,
+            "use_4bit": st.session_state.get("use_4bit", True),
+        }
+    return {
+        "backend_type": "lm_studio",
+        "model_name": "default",
+        "base_url": st.session_state.lm_studio_url,
+    }
+
+
+def get_active_backend():
+    """Return the configured backend, rebuilding it whenever the settings change.
+
+    The client used to be created once and kept until the user pressed
+    "Test Backend Connection" again, so switching model or backend in the sidebar
+    silently kept querying the old one.
+    """
+    config = backend_config()
+    signature = tuple(sorted((k, str(v)) for k, v in config.items()))
+    if (
+        st.session_state.llm_backend_client is None
+        or st.session_state.get("llm_backend_signature") != signature
+    ):
+        kwargs = dict(config)
+        backend_type = kwargs.pop("backend_type")
+        model_name = kwargs.pop("model_name")
+        st.session_state.llm_backend_client = get_backend(backend_type, model_name, **kwargs)
+        st.session_state.llm_backend_signature = signature
+    return st.session_state.llm_backend_client
+
+
 @st.cache_resource
 def get_vectorstore(path: str, mode: str) -> tuple:
     """Cache vectorstore to avoid re-indexing on reruns."""
+    from rag_backend import build_vectorstore
+
     try:
         vs, meta = build_vectorstore(path, index_mode=mode)
         return vs, meta, True
@@ -113,7 +172,7 @@ with st.sidebar:
             value=st.session_state.llama_cpp_path,
             help="e.g., /path/to/model.gguf"
         ).strip()
-        use_gpu = st.checkbox("Use GPU layers (if available)", value=True)
+        st.session_state.use_gpu_layers = st.checkbox("Use GPU layers (if available)", value=True)
     
     elif st.session_state.llm_backend == "gpt4all":
         st.session_state.gpt4all_model = st.selectbox(
@@ -128,7 +187,7 @@ with st.sidebar:
             value=st.session_state.huggingface_model,
             help="e.g., TinyLlama/TinyLlama-1.1B, mistralai/Mistral-7B"
         ).strip()
-        use_4bit = st.checkbox("Use 4-bit quantization (faster, less VRAM)", value=True)
+        st.session_state.use_4bit = st.checkbox("Use 4-bit quantization (faster, less VRAM)", value=True)
     
     elif st.session_state.llm_backend == "lm_studio":
         st.session_state.lm_studio_url = st.text_input(
@@ -140,26 +199,10 @@ with st.sidebar:
     # Test backend connection
     if st.button("🔍 Test Backend Connection"):
         try:
-            if st.session_state.llm_backend == "ollama":
-                backend = get_backend(
-                    "ollama",
-                    st.session_state.ollama_model,
-                    base_url=st.session_state.ollama_base_url,
-                    num_ctx=st.session_state.ollama_num_ctx,
-                )
-            elif st.session_state.llm_backend == "llama_cpp":
-                backend = get_backend("llama_cpp", st.session_state.llama_cpp_path, n_gpu_layers=-1 if use_gpu else 0)
-            elif st.session_state.llm_backend == "gpt4all":
-                backend = get_backend("gpt4all", st.session_state.gpt4all_model)
-            elif st.session_state.llm_backend == "huggingface":
-                backend = get_backend("huggingface", st.session_state.huggingface_model, use_4bit=use_4bit)
-            elif st.session_state.llm_backend == "lm_studio":
-                backend = get_backend("lm_studio", "default", base_url=st.session_state.lm_studio_url)
-            
+            backend = get_active_backend()
             is_healthy, msg = backend.health_check()
             if is_healthy:
                 st.success(msg)
-                st.session_state.llm_backend_client = backend
             else:
                 st.error(msg)
         except Exception as e:
@@ -208,8 +251,8 @@ with st.sidebar:
     )
     st.session_state.open_file_path = open_file_input.strip().strip('"').strip("'")
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
+    index_col, clear_col = st.columns([3, 1])
+    with index_col:
         if st.button("Load & Index Directory", use_container_width=True):
             if not path_input:
                 st.error("⚠️ Please enter a project folder path.")
@@ -239,7 +282,7 @@ with st.sidebar:
                     except Exception as e:
                         st.error(f"❌ Error indexing: {str(e)[:200]}")
     
-    with col2:
+    with clear_col:
         if st.button("🗑️ Clear", help="Clear chat history and index"):
             st.session_state.chat_history = []
             st.session_state.vs = None
@@ -255,8 +298,9 @@ with st.sidebar:
                 f"{len(meta.get('all_files', []))} files in folder · mode: {meta.get('index_mode')}"
             )
             with st.expander("📁 All files in project"):
+                indexed_set = set(meta.get("indexed_files", []))
                 for path in meta.get("all_files", []):
-                    mark = "✓" if path in set(meta.get("indexed_files", [])) else "○"
+                    mark = "✓" if path in indexed_set else "○"
                     st.text(f"{mark} {path}")
         if st.session_state.indexing_timestamp:
             elapsed = time.time() - st.session_state.indexing_timestamp
@@ -271,10 +315,12 @@ with st.sidebar:
     st.write("Click 'Record' and speak your question.")
     
     duration = st.slider("Recording Duration (sec)", min_value=3, max_value=15, value=5, help="Adjust based on question length")
-    col1, col2 = st.columns(2)
-    with col1:
+    record_col, paste_col = st.columns(2)
+    with record_col:
         if st.button(f"🔴 Record ({duration}s)", use_container_width=True):
             try:
+                with st.spinner("⏳ Loading speech model (first use may take a moment)..."):
+                    from voice_stt import record_audio, transcribe_audio
                 with st.spinner("🎤 Recording... Please speak now."):
                     audio_file = record_audio(duration=duration)
                 with st.spinner("⏳ Transcribing..."):
@@ -287,7 +333,7 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"❌ Recording error: {str(e)[:150]}")
     
-    with col2:
+    with paste_col:
         if st.button("📋 Paste from clipboard", use_container_width=True, help="Copy text and paste it here"):
             st.info("💡 Type your question in the text input field below.")
 
@@ -320,51 +366,9 @@ if "current_prompt" in st.session_state and st.session_state.current_prompt:
                     else index_mode
                 )
                 
-                # Initialize backend if not already done
-                if st.session_state.llm_backend_client is None:
-                    try:
-                        if st.session_state.llm_backend == "ollama":
-                            st.session_state.llm_backend_client = get_backend(
-                                "ollama",
-                                st.session_state.ollama_model,
-                                base_url=st.session_state.ollama_base_url,
-                                num_ctx=st.session_state.ollama_num_ctx,
-                            )
-                        elif st.session_state.llm_backend == "llama_cpp":
-                            st.session_state.llm_backend_client = get_backend(
-                                "llama_cpp",
-                                st.session_state.llama_cpp_path,
-                                n_gpu_layers=-1
-                            )
-                        elif st.session_state.llm_backend == "gpt4all":
-                            st.session_state.llm_backend_client = get_backend(
-                                "gpt4all",
-                                st.session_state.gpt4all_model
-                            )
-                        elif st.session_state.llm_backend == "huggingface":
-                            st.session_state.llm_backend_client = get_backend(
-                                "huggingface",
-                                st.session_state.huggingface_model,
-                                use_4bit=True
-                            )
-                        elif st.session_state.llm_backend == "lm_studio":
-                            st.session_state.llm_backend_client = get_backend(
-                                "lm_studio",
-                                "default",
-                                base_url=st.session_state.lm_studio_url
-                            )
-                    except Exception as e:
-                        st.error(f"❌ Failed to initialize backend: {str(e)[:200]}")
-                        st.session_state.llm_backend_client = None
+                from rag_backend import query_llm
 
-                if st.session_state.llm_backend_client is None:
-                    raise ValueError("LLM backend not initialized. Check configuration in sidebar.")
-
-                if (
-                    st.session_state.llm_backend == "ollama"
-                    and hasattr(st.session_state.llm_backend_client, "num_ctx")
-                ):
-                    st.session_state.llm_backend_client.num_ctx = st.session_state.ollama_num_ctx
+                backend_client = get_active_backend()
 
                 open_file_path = st.session_state.open_file_path
                 open_file_text = ""
@@ -385,7 +389,7 @@ if "current_prompt" in st.session_state and st.session_state.current_prompt:
                 response, docs = query_llm(
                     st.session_state.vs,
                     prompt,
-                    backend=st.session_state.llm_backend_client,
+                    backend=backend_client,
                     retriever_k=retriever_k,
                     use_mmr=use_mmr,
                     max_chars_per_doc=max_chars_per_doc,
@@ -448,23 +452,25 @@ st.subheader("💬 Chat History")
 if not st.session_state.chat_history:
     st.info("No messages yet. Start by asking a question!")
 else:
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("📥 Export Chat", use_container_width=True):
-            chat_text = "\n".join(
-                [f"**{msg['role'].upper()}:** {msg['content']}" for msg in st.session_state.chat_history]
-            )
-            st.download_button(
-                label="Download as TXT",
-                data=chat_text,
-                file_name="chat_history.txt",
-                mime="text/plain"
-            )
-    with col2:
+    export_col, clear_hist_col, count_col = st.columns(3)
+    with export_col:
+        # download_button nested inside st.button needed two clicks and disappeared
+        # on the next rerun; render it directly instead.
+        chat_text = "\n".join(
+            f"**{msg['role'].upper()}:** {msg['content']}" for msg in st.session_state.chat_history
+        )
+        st.download_button(
+            label="📥 Export Chat",
+            data=chat_text,
+            file_name="chat_history.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+    with clear_hist_col:
         if st.button("🗑️ Clear History", use_container_width=True):
             st.session_state.chat_history = []
             st.rerun()
-    with col3:
+    with count_col:
         st.metric("Messages", len(st.session_state.chat_history))
     
     for i, msg in enumerate(st.session_state.chat_history):
