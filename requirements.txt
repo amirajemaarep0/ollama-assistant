@@ -1,22 +1,26 @@
+# Interface
 streamlit
+
+# Context handling / RAG (LangChain + Chroma)
 langchain
 langchain-community
-langchain-huggingface
+langchain-huggingface      # all-MiniLM-L6-v2 embeddings for the vector store
+sentence-transformers      # required by langchain-huggingface
+chromadb
+pypdf                      # required by PyPDFLoader
+
+# AI engine (local): Ollama
+ollama
+requests
+
+# Transcription (local): OpenAI Whisper
 openai-whisper
+torch                      # required by whisper
 sounddevice
 numpy
 scipy
-chromadb
-pypdf
-sentence-transformers
+
+# Tests
 pytest
-torch
-torchaudio
-ollama
-# LLaMA.cpp: pip install llama-cpp-python
-# GPT4All: pip install gpt4all
-# Hugging Face: pip install transformers bitsandbytes
-# LM Studio: pip install requests (already included)
 
 reportlab
-requests

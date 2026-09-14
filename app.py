@@ -28,14 +28,9 @@ session_defaults = {
     "vs": None,
     "chat_history": [],
     "repo_path": "",
-    "llm_backend": "ollama",
     "ollama_base_url": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
     "ollama_model": os.environ.get("OLLAMA_MODEL", "llama3"),
     "ollama_num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "4096")),
-    "llama_cpp_path": "",
-    "gpt4all_model": "Mistral7B",
-    "huggingface_model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    "lm_studio_url": "http://localhost:1234",
     "indexed_mode": None,
     "index_meta": None,
     "indexed_files_count": 0,
@@ -62,32 +57,11 @@ INDEX_LABEL_TO_MODE = {
 
 def backend_config() -> dict:
     """Current backend settings, as kwargs for get_backend()."""
-    kind = st.session_state.llm_backend
-    if kind == "ollama":
-        return {
-            "backend_type": "ollama",
-            "model_name": st.session_state.ollama_model,
-            "base_url": st.session_state.ollama_base_url,
-            "num_ctx": st.session_state.ollama_num_ctx,
-        }
-    if kind == "llama_cpp":
-        return {
-            "backend_type": "llama_cpp",
-            "model_name": st.session_state.llama_cpp_path,
-            "n_gpu_layers": -1 if st.session_state.get("use_gpu_layers", True) else 0,
-        }
-    if kind == "gpt4all":
-        return {"backend_type": "gpt4all", "model_name": st.session_state.gpt4all_model}
-    if kind == "huggingface":
-        return {
-            "backend_type": "huggingface",
-            "model_name": st.session_state.huggingface_model,
-            "use_4bit": st.session_state.get("use_4bit", True),
-        }
     return {
-        "backend_type": "lm_studio",
-        "model_name": "default",
-        "base_url": st.session_state.lm_studio_url,
+        "backend_type": "ollama",
+        "model_name": st.session_state.ollama_model,
+        "base_url": st.session_state.ollama_base_url,
+        "num_ctx": st.session_state.ollama_num_ctx,
     }
 
 
@@ -127,77 +101,29 @@ def get_vectorstore(path: str, mode: str) -> tuple:
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # LLM Backend Selection
-    st.subheader("🤖 LLM Backend")
-    backend_choice = st.selectbox(
-        "Select inference backend:",
-        ["Ollama", "LLaMA.cpp", "GPT4All", "Hugging Face", "LM Studio"],
-        index=0,
-        help="Choose where to run the LLM locally"
+    # Ollama is the local inference engine named in the project specification.
+    st.subheader("🤖 Ollama")
+    st.session_state.ollama_base_url = st.text_input(
+        "Ollama API URL",
+        value=st.session_state.ollama_base_url,
+        help="Default: http://localhost:11434"
+    ).strip().rstrip("/")
+    st.session_state.ollama_model = st.text_input(
+        "Ollama model name",
+        value=st.session_state.ollama_model,
+        help="e.g., llama3, mistral, qwen3:1.7b (smaller/faster on 8 GB RAM)"
+    ).strip()
+    st.session_state.ollama_num_ctx = st.slider(
+        "Context window (tokens)",
+        1024,
+        8192,
+        st.session_state.ollama_num_ctx,
+        step=512,
+        help="Lower this (2048–4096) if you see memory errors with llama3 on a 4 GB GPU.",
     )
-    
-    backend_map = {
-        "Ollama": "ollama",
-        "LLaMA.cpp": "llama_cpp",
-        "GPT4All": "gpt4all",
-        "Hugging Face": "huggingface",
-        "LM Studio": "lm_studio"
-    }
-    st.session_state.llm_backend = backend_map[backend_choice]
-    
-    # Backend-specific configuration
-    if st.session_state.llm_backend == "ollama":
-        st.session_state.ollama_base_url = st.text_input(
-            "Ollama API URL",
-            value=st.session_state.ollama_base_url,
-            help="Default: http://localhost:11434"
-        ).strip().rstrip("/")
-        st.session_state.ollama_model = st.text_input(
-            "Ollama model name",
-            value=st.session_state.ollama_model,
-            help="e.g., llama3, mistral, qwen3:1.7b (smaller/faster on 8 GB RAM)"
-        ).strip()
-        st.session_state.ollama_num_ctx = st.slider(
-            "Context window (tokens)",
-            1024,
-            8192,
-            st.session_state.ollama_num_ctx,
-            step=512,
-            help="Lower this (2048–4096) if you see memory errors with llama3 on a 4 GB GPU.",
-        )
-    
-    elif st.session_state.llm_backend == "llama_cpp":
-        st.session_state.llama_cpp_path = st.text_input(
-            "Path to GGUF model file",
-            value=st.session_state.llama_cpp_path,
-            help="e.g., /path/to/model.gguf"
-        ).strip()
-        st.session_state.use_gpu_layers = st.checkbox("Use GPU layers (if available)", value=True)
-    
-    elif st.session_state.llm_backend == "gpt4all":
-        st.session_state.gpt4all_model = st.selectbox(
-            "GPT4All model",
-            ["Mistral7B", "Nous-Hermes-2-Mistral-7B", "Orca-2-7B", "Phi-2"],
-            help="Auto-downloads on first use"
-        )
-    
-    elif st.session_state.llm_backend == "huggingface":
-        st.session_state.huggingface_model = st.text_input(
-            "Hugging Face model ID",
-            value=st.session_state.huggingface_model,
-            help="e.g., TinyLlama/TinyLlama-1.1B, mistralai/Mistral-7B"
-        ).strip()
-        st.session_state.use_4bit = st.checkbox("Use 4-bit quantization (faster, less VRAM)", value=True)
-    
-    elif st.session_state.llm_backend == "lm_studio":
-        st.session_state.lm_studio_url = st.text_input(
-            "LM Studio API URL",
-            value=st.session_state.lm_studio_url,
-            help="Default: http://localhost:1234"
-        ).strip().rstrip("/")
-    
+
     # Test backend connection
-    if st.button("🔍 Test Backend Connection"):
+    if st.button("🔍 Test Ollama Connection"):
         try:
             backend = get_active_backend()
             is_healthy, msg = backend.health_check()
@@ -219,7 +145,7 @@ with st.sidebar:
         "After changing this, click **Load & Index Directory** again.",
     )
     index_mode = INDEX_LABEL_TO_MODE[index_choice]
-    st.caption("**Speed:** smaller model, fewer chunks, lower max tokens. GPU accelerates all backends.")
+    st.caption("**Speed:** smaller model, fewer chunks, lower max tokens. Ollama uses your GPU when one is available.")
     retriever_k = st.slider(
         "Snippets to retrieve",
         1,
@@ -394,7 +320,7 @@ if "current_prompt" in st.session_state and st.session_state.current_prompt:
                     use_mmr=use_mmr,
                     max_chars_per_doc=max_chars_per_doc,
                     num_predict=max_answer_tokens,
-                    num_ctx=st.session_state.ollama_num_ctx if st.session_state.llm_backend == "ollama" else 4096,
+                    num_ctx=st.session_state.ollama_num_ctx,
                     project_root=st.session_state.repo_path or None,
                     index_mode=prompt_index_mode,
                     open_file_path=open_file_path,
@@ -415,12 +341,11 @@ if "current_prompt" in st.session_state and st.session_state.current_prompt:
                     )
                 ):
                     st.error(
-                        "🔴 **Cannot reach LLM backend.** Check configuration in sidebar.\n\n"
-                        "**Ollama:** Install from ollama.com, start the app\n"
-                        "**LLaMA.cpp:** Point to your GGUF model file\n"
-                        "**GPT4All:** Models auto-download on first use\n"
-                        "**HF:** Requires transformers library\n"
-                        "**LM Studio:** Start the app on localhost:1234"
+                        "🔴 **Cannot reach Ollama.**\n\n"
+                        "1. Install it from ollama.com and start the Ollama app\n"
+                        "2. Pull the model: `ollama pull llama3`\n"
+                        "3. Check the **Ollama API URL** in the sidebar "
+                        "(default `http://localhost:11434`)"
                     )
                 elif any(
                     x in err

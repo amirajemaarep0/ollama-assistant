@@ -1,166 +1,99 @@
 # Local Voice AI Dev Assistant - Setup Guide
 
-This app supports **5 different LLM backends** for local inference. Choose one based on your preferences.
+Everything runs **on your machine**. No code or documents leave the computer.
+
+The stack follows the project specification:
+
+| Component | Tool |
+|---|---|
+| Language | Python |
+| Interface | Streamlit |
+| AI Engine (Local) | Ollama |
+| Transcription | OpenAI Whisper (local) |
+| Context Handling | LangChain |
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Install Base Requirements
+### 1. Install the Python requirements
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Choose & Setup Your LLM Backend
+### 2. Install and start Ollama
 
----
-
-## 🤖 LLM Backend Options
-
-### **Option 1: Ollama** ⭐ (Recommended - Easiest)
-**Best for:** Beginners, want a simple setup
-
-1. Install Ollama: https://ollama.com/download
-2. Start the Ollama app (runs on `localhost:11434`)
+1. Download Ollama: https://ollama.com/download
+2. Start the Ollama app. It listens on `http://localhost:11434`.
 3. Pull a model:
-   ```bash
-   ollama pull llama3          # Full-size (~4GB)
-   ollama pull mistral         # Medium (~5GB, faster)
-   ollama pull neural-chat     # Small (~4GB)
-   ollama pull qwen:1.5b       # Tiny (~1GB, very fast on CPU)
-   ```
-4. Run the app:
-   ```bash
-   streamlit run app.py
-   ```
-5. In app, select **Ollama** backend (should auto-detect)
 
----
+```bash
+ollama pull llama3
+```
 
-### **Option 2: LLaMA.cpp** ⚡ (Fastest on CPU)
-**Best for:** Best performance, CPU-only machines
+Other options, smallest to largest:
 
-1. Install:
-   ```bash
-   pip install llama-cpp-python
-   ```
+```bash
+ollama pull qwen2.5:1.5b    # ~1 GB, very fast, good on CPU-only machines
+ollama pull mistral         # ~4 GB
+ollama pull llama3          # ~4.7 GB, best answers
+```
 
-2. Download a GGUF model (quantized):
-   - From [Hugging Face](https://huggingface.co/search/full-text?q=gguf):
-     - `TheBloke/Mistral-7B-Instruct-v0.1-GGUF`
-     - `TheBloke/Phi-2-GGUF`
-     - `TheBloke/qwen1_5-1_8b-chat-gguf`
-   - Extract `.gguf` file to a known path
-
-3. In app, select **LLaMA.cpp** and point to `.gguf` file
-
----
-
-### **Option 3: GPT4All** 🎯 (Simplest)
-**Best for:** Absolute beginners, auto-download models
-
-1. Install:
-   ```bash
-   pip install gpt4all
-   ```
-
-2. Run the app:
-   ```bash
-   streamlit run app.py
-   ```
-
-3. Select **GPT4All** backend, models auto-download on first use
-
----
-
-### **Option 4: Hugging Face Transformers** 🔬 (Most Control)
-**Best for:** Power users, custom models, quantization
-
-1. Install:
-   ```bash
-   pip install transformers torch bitsandbytes
-   ```
-
-2. Run the app and select **Hugging Face**
-
-3. Paste a model ID (e.g., `TinyLlama/TinyLlama-1.1B-Chat-v1.0`)
-
-4. Optional: Enable 4-bit quantization for lower VRAM
-
----
-
-### **Option 5: LM Studio** 🖥️ (GUI + API)
-**Best for:** Visual model management, easy switching
-
-1. Install [LM Studio](https://lmstudio.ai/)
-2. Download models via the GUI
-3. Start local server (listens on `localhost:1234`)
-4. In app, select **LM Studio** backend
-
----
-
-## 💡 Quick Comparison
-
-| Feature | Ollama | LLaMA.cpp | GPT4All | HF | LM Studio |
-|---------|--------|-----------|---------|-----|-----------|
-| **Setup Time** | 5 min | 10 min | 2 min | 15 min | 10 min |
-| **Speed** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐ |
-| **CPU Only** | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **GPU Support** | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Model Count** | High | High | Limited | Huge | Medium |
-| **Ease of Use** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ |
-
----
-
-## 🎯 Recommendations by Use Case
-
-- **Just want it to work:** → **GPT4All** or **Ollama**
-- **Best performance:** → **LLaMA.cpp**
-- **Learning/experimenting:** → **Hugging Face**
-- **GUI + easy switching:** → **LM Studio**
-- **Production ready:** → **Ollama** or **LLaMA.cpp**
-
----
-
-## 🔧 Troubleshooting
-
-### Backend not connecting?
-1. Check "Test Backend Connection" in sidebar
-2. Ensure service is running (Ollama app, LM Studio, etc.)
-3. Try restarting the app: `streamlit run app.py`
-
-### Model running very slow?
-- Switch to smaller model (qwen, phi, neural-chat)
-- Reduce "Snippets to retrieve" slider
-- Enable 4-bit quantization (HF backend)
-- Use LLaMA.cpp with GPU acceleration
-
-### Out of memory?
-- Use 4-bit quantization
-- Try a smaller model
-- Reduce max context window
-- Enable GPU acceleration
-
----
-
-## 📝 Using the App
-
-1. **Index your code/docs** in the sidebar ("Project folder path")
-2. **Select what to index** (Python only, docs, or both)
-3. **Test your backend** (button in sidebar)
-4. **Ask a question** via text or voice
-5. **View retrieved snippets** in expanders below answers
-
----
-
-## 🚀 Running the App
+### 3. Run the app
 
 ```bash
 streamlit run app.py
 ```
 
-Access at: `http://localhost:8501`
+Then open `http://localhost:8501`.
 
 ---
 
-Enjoy! 🎉
+## 📝 Using the App
+
+1. **Test Ollama** with the sidebar button. It confirms the server is reachable
+   *and* that the model you named is actually pulled.
+2. **Set the project folder path** in the sidebar.
+3. **Choose what to index**: Python only, documents only, or both.
+4. Click **Load & Index Directory**.
+5. **Ask a question** by typing, or click **Record** to ask out loud.
+6. Expand **Retrieved snippets** under an answer to see which files were used.
+
+The first recording downloads the Whisper model (~140 MB for `base`) and the
+first indexing run downloads the embedding model (~90 MB). Both are cached
+afterwards.
+
+---
+
+## 🔧 Troubleshooting
+
+### "Cannot reach Ollama"
+1. Make sure the Ollama app is running.
+2. Check the **Ollama API URL** in the sidebar (default `http://localhost:11434`).
+3. Verify from a terminal: `ollama list`.
+
+### "Model is not pulled"
+Run `ollama pull <model>` with the name shown in the sidebar.
+
+### Out of memory when loading the model
+- Lower **Context window** to 2048.
+- Use a smaller model: `ollama pull qwen2.5:1.5b`.
+- Reduce **Snippets to retrieve** and **Max characters per snippet**.
+- Close other applications and restart Ollama.
+
+### Answers are slow
+Ollama runs an 8B model locally; the first query also loads it into memory.
+A smaller model is the biggest single speedup.
+
+### Voice input does nothing
+Check that a microphone is available and permitted. Whisper decodes the WAV
+directly, so FFmpeg is not required.
+
+---
+
+## 🧪 Tests
+
+```bash
+pytest test_app.py
+```
