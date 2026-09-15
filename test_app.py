@@ -388,7 +388,7 @@ def test_query_llm_sends_every_file_for_a_whole_project_question(tmp_path):
 
 
 def test_check_python_syntax_all_finds_more_than_the_first_error(tmp_path):
-    """ast.parse stops at the first error; a recovering parser continues."""
+    """ast.parse stops at the first error; the repair loop continues past it."""
     from rag_backend import check_python_syntax_all
 
     source = (
@@ -411,7 +411,7 @@ def test_check_python_syntax_all_finds_more_than_the_first_error(tmp_path):
 
 
 def test_single_error_file_reports_exactly_one_problem():
-    """A recovering parser cascades; clustering must not invent extra errors."""
+    """A file with one mistake must report exactly one error, never a cascade."""
     from rag_backend import check_python_syntax_all
 
     source = (
@@ -432,11 +432,40 @@ def test_check_python_syntax_all_is_empty_for_valid_code():
     assert check_python_syntax_all("def f(x):\n    return x\n", "ok.py") == []
 
 
-def test_cluster_error_lines_walks_from_the_previous_line():
-    from rag_backend import _cluster_error_lines
+def test_repair_loop_finds_errors_on_adjacent_lines():
+    """Regression: proximity clustering merged three real errors into one,
+    because a recovering parser's cascade is indistinguishable by line distance."""
+    from rag_backend import check_python_syntax_all
 
-    runs = [(9, "a"), (10, "b"), (11, "c"), (13, "d"), (14, "e")]
-    assert _cluster_error_lines(runs) == [(9, "a")]
+    source = (
+        '"""Reporting."""\n'
+        "from utils import format_price\n"
+        "\n\n"
+        "def summarise(warehouse)\n"
+        "    lines = []\n"
+        "    total = 0\n"
+        "\n"
+        "    for sku, product in warehouse.products.items()\n"
+        '        lines.append(f"{sku}"\n'
+        "        total += product.total_value()\n"
+    )
+    found = check_python_syntax_all(source, "reports.py")
+    assert [f["line"] for f in found] == [5, 9, 10]
+    assert all("invalid syntax" not in f["msg"] for f in found), "each keeps a precise message"
 
-    separated = [(5, "a"), (6, "b"), (7, "c"), (20, "d")]
-    assert [line for line, _ in _cluster_error_lines(separated)] == [5, 20]
+
+def test_repair_loop_terminates_on_unrepairable_source():
+    from rag_backend import check_python_syntax_all
+
+    found = check_python_syntax_all("@@@ !!! ???\n" * 5, "junk.py")
+    assert 1 <= len(found) <= 10
+
+
+def test_unclosed_bracket_line_locates_the_opener():
+    from rag_backend import _unclosed_bracket_line
+
+    lines = ["def f():", "    print('a'", "", "def g():"]
+    assert _unclosed_bracket_line(lines, 4) == (2, ")")
+    assert _unclosed_bracket_line(["x = (1 + 2)", "y = 3"], 2) is None
+    # A bracket inside a string is not an opener.
+    assert _unclosed_bracket_line(['s = "(("', "y = 1"], 2) is None

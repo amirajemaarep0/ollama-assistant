@@ -315,74 +315,132 @@ def check_python_syntax(source: str, rel_path: str) -> dict[str, Any] | None:
         return {"path": rel_path, "line": None, "offset": None, "msg": str(exc), "text": ""}
 
 
-def _parso_error_lines(source: str, rel_path: str) -> list[tuple[int, str]]:
-    """(line, message) for every syntax error parso can recover from.
+_CLOSERS = {"(": ")", "[": "]", "{": "}"}
 
-    Returns [] when parso is not installed, so ast stays the baseline and parso
-    is an optional upgrade.
+
+def _unclosed_bracket_line(lines: list[str], before_line: int) -> tuple[int, str] | None:
+    """Find a bracket opened before `before_line` and never closed.
+
+    CPython reports a generic "invalid syntax" at the point where an unclosed
+    bracket finally becomes impossible, which is often several lines below the
+    real mistake. Scanning the bracket depth finds where it actually opened.
     """
-    try:
-        import parso
-    except ImportError:
-        return []
-    try:
-        grammar = parso.load_grammar()
-        tree = grammar.parse(source)
-        found = [(e.start_pos[0], e.message) for e in grammar.iter_errors(tree)]
-    except Exception:
-        return []
-    found.sort(key=lambda item: item[0])
-    return found
+    stack: list[tuple[str, int]] = []
+    for number, line in enumerate(lines[: max(before_line, 0)], start=1):
+        in_quote = ""
+        index = 0
+        while index < len(line):
+            char = line[index]
+            if in_quote:
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == in_quote:
+                    in_quote = ""
+            elif char in "\"'":
+                in_quote = char
+            elif char == "#":
+                break
+            elif char in _CLOSERS:
+                stack.append((char, number))
+            elif char in ")]}":
+                if stack:
+                    stack.pop()
+            index += 1
+    if not stack:
+        return None
+    opener, number = stack[0]
+    return number, _CLOSERS[opener]
 
 
-def _cluster_error_lines(
-    errors: list[tuple[int, str]], gap: int = 3
-) -> list[tuple[int, str]]:
-    """Collapse runs of nearby errors to their first line.
+def _repair_reported_line(lines: list[str], problem: dict[str, Any]) -> bool:
+    """Apply the minimal fix for one reported error, in place.
 
-    A single mistake usually makes a recovering parser complain on several
-    consecutive lines, so lines within `gap` of the previous one are treated as
-    knock-on effects of the same problem rather than separate errors.
+    Returns True when the line was changed. The result is never shown to the
+    user; it exists only so CPython's parser can get past this error and reveal
+    the next genuine one.
     """
-    clusters: list[tuple[int, str]] = []
-    previous: int | None = None
-    for line, message in errors:
-        # Compare against the previous error line, not the cluster's first line:
-        # a cascade walks down the file one or two lines at a time.
-        if previous is not None and line - previous <= gap:
-            previous = line
-            continue
-        clusters.append((line, message))
-        previous = line
-    return clusters
+    lineno = problem.get("line")
+    message = problem.get("msg") or ""
+    if not lineno or lineno > len(lines):
+        return False
+
+    index = lineno - 1
+    line = lines[index]
+    stripped = line.rstrip()
+
+    if "expected ':'" in message:
+        lines[index] = stripped + ":"
+        return True
+
+    if "was never closed" in message:
+        opener = message.split("'")[1] if "'" in message else ""
+        closer = _CLOSERS.get(opener)
+        if closer:
+            lines[index] = stripped + closer
+            return True
+        return False
+
+    if "unterminated string literal" in message:
+        quote = '"' if stripped.count('"') % 2 else ("'" if stripped.count("'") % 2 else "")
+        if quote:
+            lines[index] = stripped + quote
+            return True
+        return False
+
+    if "Missing parentheses in call to" in message:
+        match = re.match(r"^(\s*)(print|exec)\s+(.*)$", line)
+        if match:
+            indent, name, rest = match.groups()
+            lines[index] = f"{indent}{name}({rest.rstrip()})"
+            return True
+        return False
+
+    if "expected an indented block" in message:
+        indent = len(line) - len(line.lstrip())
+        lines[index] = " " * (indent + 4) + line.lstrip()
+        return True
+
+    # Generic "invalid syntax" is usually a bracket opened further up.
+    found = _unclosed_bracket_line(lines, index)
+    if found:
+        number, closer = found
+        lines[number - 1] = lines[number - 1].rstrip() + closer
+        return True
+
+    return False
 
 
-def check_python_syntax_all(source: str, rel_path: str) -> list[dict[str, Any]]:
-    """Every distinct syntax problem in one file, best-effort.
+def check_python_syntax_all(
+    source: str, rel_path: str, max_errors: int = 10
+) -> list[dict[str, Any]]:
+    """Every syntax error in one file, each with CPython's own message.
 
-    CPython's parser stops at the first error but gives the clearest message, so
-    it provides the first entry. parso recovers and keeps going, so it supplies
-    the later ones - clustered, because a recovering parser cascades.
+    ast.parse stops at the first error and cannot resume, so this repairs the
+    reported line on a throwaway copy of the source and parses again. Every
+    error therefore comes from CPython itself rather than from a recovering
+    parser guessing, which is what keeps cascades out of the list.
     """
     first = check_python_syntax(source, rel_path)
     if first is None:
         return []
 
     results = [first]
-    first_line = first["line"] or 0
-    for line, message in _cluster_error_lines(_parso_error_lines(source, rel_path)):
-        if line <= first_line + 3:
-            continue  # same problem CPython already reported, more precisely
-        results.append(
-            {
-                "path": rel_path,
-                "line": line,
-                "offset": None,
-                "msg": message.replace("SyntaxError: ", "").replace("IndentationError: ", ""),
-                "text": "",
-                "recovered": True,
-            }
-        )
+    lines = source.splitlines()
+    current = first
+
+    for _ in range(max_errors - 1):
+        if not _repair_reported_line(lines, current):
+            break
+        nxt = check_python_syntax(chr(10).join(lines), rel_path)
+        if nxt is None:
+            break
+        if nxt["line"] == current["line"] and nxt["msg"] == current["msg"]:
+            break  # repair did not move us on; stop rather than loop
+        nxt["recovered"] = True
+        results.append(nxt)
+        current = nxt
+
     return results
 
 
@@ -457,9 +515,9 @@ def format_syntax_report(problems: list[dict[str, Any]], checked: list[str]) -> 
     if extra:
         lines.append("")
         lines.append(
-            "_Python stops at the first error, so the ones marked with an arrow come "
-            "from a recovering parser and may be knock-on effects. Fix the first error "
-            "in a file and ask again for exact messages on the rest._"
+            "_Python reports one error at a time, so the ones marked with an arrow "
+            "were found by provisionally fixing the error above them. Fix them from "
+            "the top down: correcting the first may change the lines reported after it._"
         )
     return "\n".join(lines).rstrip()
 

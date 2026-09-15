@@ -23,7 +23,6 @@ scipy
 # Code checking. Both are optional: the syntax check falls back to Python's own
 # parser alone without them.
 pyflakes                   # undefined names, unused imports
-parso                      # recovers after a syntax error to find later ones
 
 # Tests
 pytest
