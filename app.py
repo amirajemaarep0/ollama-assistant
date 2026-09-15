@@ -263,6 +263,12 @@ Python files, documents (`.pdf`, `.md`, `.txt`, `.rst`), or both.
 Press the 🎙 mic in the chat bar below, next to the send arrow, and speak.
 Whisper transcribes it on this machine. No microphone? Just type.
 
+**⚡ Optimises a function**
+
+Name a function and it is sent whole, not in fragments. The rewrite is then
+run against the original on sample inputs — a faster function that returns
+different answers is caught and flagged, not handed to you.
+
 **🩺 Checks your Python**
 
 Python's own parser finds syntax errors; pyflakes finds undefined names
@@ -285,7 +291,7 @@ No code or document leaves this computer.
     with ask_col:
         st.markdown(
             """
-**Five kinds of question it recognises**
+**Six kinds of question it recognises**
 
 | Ask it | What happens |
 | --- | --- |
@@ -293,6 +299,7 @@ No code or document leaves this computer.
 | *Scan the whole project* | Outlines **every** file, not just the closest matches |
 | *What is wrong with app.py?* | Parses it, points at syntax errors and undefined names, no model needed |
 | *What does app.py do?* | Reads that file and explains it |
+| *Optimize count_duplicates in utils.py* | Rewrites that one function, then checks the rewrite still parses **and still returns the same answers** |
 | *How does the indexing work?* | Searches the index, answers from the best matches |
 
 **Also**

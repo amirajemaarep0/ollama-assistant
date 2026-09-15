@@ -1,6 +1,9 @@
 import ast
+import json
 import os
 import re
+import subprocess
+import sys
 from typing import Any, Literal
 
 from langchain_core.prompts import PromptTemplate
@@ -227,6 +230,62 @@ def try_answer_file_content_question(
     return response.strip()
 
 
+def try_answer_optimization_question(
+    question: str,
+    project_root: str | None,
+    index_meta: dict[str, Any] | None,
+    backend: Any | None = None,
+    num_predict: int = 512,
+) -> str | None:
+    """Rewrite one named function, giving the model its exact source.
+
+    Retrieval would hand over a few 900-character chunks, which is not enough to
+    rewrite a function correctly. The whole function is extracted with ast
+    instead, and the reply is checked for parseability afterwards.
+    """
+    if not is_optimization_question(question) or backend is None:
+        return None
+    root = (project_root or (index_meta or {}).get("root") or "").strip()
+    if not root:
+        return None
+
+    named = [n for n in extract_mentioned_files(question) if n.lower().endswith(".py")]
+    if not named:
+        return None
+
+    for rel, source in _resolve_python_files(root, named, index_meta):
+        name = find_requested_function(question, source, rel)
+        if name is None:
+            available = ", ".join(
+                sorted(q.rsplit(".", 1)[-1] for q, _ in iter_function_defs(source, rel))
+            )
+            return (
+                f"Name the function you want optimised in `{rel}`. "
+                + (f"It defines: {available}." if available else "It defines no functions.")
+            )
+
+        found = extract_function_source(source, name, rel)
+        if found is None:
+            return None
+        qualified, function_source, start_line = found
+
+        prompt = build_optimization_prompt(rel, qualified, function_source, question)
+        if hasattr(backend, "invoke") and callable(getattr(backend, "invoke")):
+            answer = backend.invoke(prompt)
+        elif hasattr(backend, "query") and callable(getattr(backend, "query")):
+            answer = backend.query(prompt, max_tokens=num_predict)
+        else:
+            return None
+        if not isinstance(answer, str):
+            answer = getattr(answer, "text", None) or str(answer)
+        answer = answer.strip()
+
+        header = f"**Optimising `{qualified}`** in `{rel}` (line {start_line})"
+        return header + chr(10) + chr(10) + answer + chr(10) + chr(10) + verify_optimized_function(answer, qualified, function_source)
+
+    return None
+
+
 def load_mentioned_files_context(
     project_root: str,
     filenames: list[str],
@@ -442,6 +501,238 @@ def check_python_syntax_all(
         current = nxt
 
     return results
+
+
+_OPTIMISE_PATTERNS = re.compile(
+    r"\b("
+    r"optimi[sz]e|optimi[sz]ed|optimi[sz]ation|"
+    r"improve|refactor|rewrite|clean\s+up|simplify|"
+    r"faster|quicker|speed\s+\w*\s*up|"
+    r"more\s+efficient|performance|"
+    r"optimise[rz]?|am[ée]liore[rz]?|refactorise[rz]?|simplifie[rz]?|plus\s+rapide"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_optimization_question(question: str) -> bool:
+    return bool(_OPTIMISE_PATTERNS.search(question))
+
+
+def iter_function_defs(source: str, rel_path: str = "<unknown>"):
+    """Yield (qualified_name, node) for every function and method in a module."""
+    try:
+        tree = ast.parse(source, filename=rel_path)
+    except (SyntaxError, ValueError):
+        return
+
+    def walk(node, prefix=""):
+        for child in getattr(node, "body", []):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                yield prefix + child.name, child
+            elif isinstance(child, ast.ClassDef):
+                yield from walk(child, prefix + child.name + ".")
+
+    yield from walk(tree)
+
+
+def extract_function_source(source: str, name: str, rel_path: str = "<unknown>"):
+    """Exact source of one function, decorators included, or None.
+
+    `name` may be a bare function name or Class.method.
+    """
+    lines = source.splitlines()
+    wanted = name.lower()
+    for qualified, node in iter_function_defs(source, rel_path):
+        if qualified.lower() != wanted and qualified.lower().rsplit(".", 1)[-1] != wanted:
+            continue
+        start = node.lineno
+        for decorator in getattr(node, "decorator_list", []):
+            start = min(start, decorator.lineno)
+        end = getattr(node, "end_lineno", node.lineno)
+        return qualified, chr(10).join(lines[start - 1 : end]), start
+    return None
+
+
+def find_requested_function(question: str, source: str, rel_path: str) -> str | None:
+    """Which function in this file the question is about.
+
+    Matches the question against the names actually defined in the file rather
+    than trying to parse the sentence, so "speed up summarise" and
+    "optimize the summarise() method" both work.
+    """
+    lowered = question.lower()
+    best = None
+    for qualified, _node in iter_function_defs(source, rel_path):
+        bare = qualified.rsplit(".", 1)[-1]
+        if re.search(r"\b" + re.escape(bare.lower()) + r"\b", lowered):
+            if best is None or len(bare) > len(best.rsplit(".", 1)[-1]):
+                best = qualified
+    return best
+
+
+def build_optimization_prompt(rel_path: str, name: str, function_source: str, question: str) -> str:
+    return (
+        "You are a Python performance engineer. Rewrite the function below so it is "
+        "faster and clearer, without changing what it returns.\n\n"
+        f"File: {rel_path}\n"
+        f"Function: {name}\n\n"
+        "```python\n"
+        f"{function_source}\n"
+        "```\n\n"
+        f"Request: {question}\n\n"
+        "Rules:\n"
+        "- Keep the same function name, parameters and return value.\n"
+        "- Use only the standard library.\n"
+        "- Reply with ONE complete ```python code block containing the whole "
+        "rewritten function, then a short bullet list of what you changed and why.\n"
+        "- If the function is already efficient, say so plainly and return it unchanged."
+    )
+
+
+def extract_code_block(answer: str) -> str | None:
+    """The first fenced code block in a model reply."""
+    match = re.search(r"```(?:python)?\s*\n(.*?)```", answer, re.DOTALL)
+    return match.group(1).rstrip() if match else None
+
+
+_DIFF_HARNESS = '''
+import itertools, json, sys
+
+ORIGINAL = {original!r}
+REWRITTEN = {rewritten!r}
+NAME = {name!r}
+
+def load(src):
+    namespace = {{}}
+    exec(compile(src, "<candidate>", "exec"), namespace)
+    return namespace[NAME]
+
+try:
+    before, after = load(ORIGINAL), load(REWRITTEN)
+except Exception as exc:
+    print(json.dumps({{"status": "load-failed", "detail": str(exc)[:200]}}))
+    sys.exit()
+
+CANDIDATES = [
+    [], [1], [1, 1], [1, 1, 1], [1, 2, 2, 3, 3, 3], [5, 4, 3, 2, 1],
+    list("aabbcc"), list(range(8)), [0, 0, 0, 1], [True, False, True],
+]
+
+mismatches, ran = [], 0
+for value in CANDIDATES:
+    try:
+        expected = before(list(value))
+    except Exception:
+        continue
+    try:
+        actual = after(list(value))
+    except Exception as exc:
+        ran += 1
+        mismatches.append({{"input": repr(value), "expected": repr(expected),
+                           "actual": "raised " + type(exc).__name__}})
+        continue
+    ran += 1
+    if expected != actual:
+        mismatches.append({{"input": repr(value), "expected": repr(expected),
+                           "actual": repr(actual)}})
+
+print(json.dumps({{"status": "ok", "ran": ran, "mismatches": mismatches[:4]}}))
+'''
+
+
+def differential_test(
+    original_source: str, rewritten_source: str, name: str, timeout: int = 15
+) -> dict[str, Any]:
+    """Run both versions on sample inputs and compare, in a separate process.
+
+    A rewrite can parse, keep its name, and still return different answers -- an
+    LLM cannot run what it writes. This is the only check that catches that.
+    A subprocess keeps a hang or a crash in generated code away from the app.
+    """
+    bare = name.rsplit(".", 1)[-1]
+    if "." in name:
+        return {"status": "skipped", "detail": "methods are not tested automatically"}
+
+    script = _DIFF_HARNESS.format(
+        original=original_source, rewritten=rewritten_source, name=bare
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "detail": f"did not finish within {timeout}s"}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)[:200]}
+
+    try:
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+    except Exception:
+        return {"status": "error", "detail": (completed.stderr or "no output")[:200]}
+
+
+def format_differential_note(result: dict[str, Any], name: str) -> str:
+    status = result.get("status")
+    if status == "ok" and result.get("ran"):
+        mismatches = result.get("mismatches") or []
+        if not mismatches:
+            return (
+                f"✅ Behaviour check: `{name}` returned the same result as the "
+                f"original on all {result['ran']} sample input(s)."
+            )
+        lines = [
+            f"❌ **Behaviour changed.** The rewrite disagrees with the original "
+            f"on {len(mismatches)} of {result['ran']} sample input(s). Do not use it as is:",
+            "",
+        ]
+        for m in mismatches:
+            lines.append(f"- `{m['input']}` → original `{m['expected']}`, rewrite `{m['actual']}`")
+        return chr(10).join(lines)
+    if status == "timeout":
+        return f"⚠️ Behaviour check timed out ({result.get('detail')}). The rewrite may not terminate."
+    return f"⚠️ Behaviour could not be checked automatically ({result.get('detail', status)}). Test it yourself."
+
+
+def verify_optimized_function(
+    answer: str, name: str, original_source: str | None = None
+) -> str:
+    """Check the returned code parses and still defines the function.
+
+    The model cannot run anything, so this is the one guarantee worth making
+    automatically before the user pastes the result into their file.
+    """
+    code = extract_code_block(answer)
+    if code is None:
+        return "⚠️ No code block found in the reply, so nothing could be checked."
+
+    problem = check_python_syntax(code, name + " (rewritten)")
+    if problem:
+        return (
+            f"❌ The rewritten code does not parse: line {problem['line']}: "
+            f"{problem['msg']}. Do not paste it in as is."
+        )
+
+    bare = name.rsplit(".", 1)[-1]
+    defined = {q.rsplit(".", 1)[-1] for q, _ in iter_function_defs(code)}
+    if bare not in defined:
+        found = ", ".join(sorted(defined)) or "none"
+        return f"⚠️ The reply defines {found}, not `{bare}`. Check it before using it."
+
+    parts = [f"✅ The rewritten `{bare}` parses and keeps its name."]
+    quality = [f for f in check_python_quality(code, "rewritten.py") if f["is_bug"]]
+    if quality:
+        parts.append(
+            "⚠️ " + "; ".join(f"line {f['line']}: {f['msg']}" for f in quality)
+        )
+    if original_source is not None:
+        parts.append(
+            format_differential_note(
+                differential_test(original_source, code, name), bare
+            )
+        )
+    return chr(10).join(parts)
 
 
 def _resolve_python_files(project_root: str, names: list[str], index_meta: dict[str, Any] | None):
@@ -1024,6 +1315,12 @@ def query_llm(
             backend_obj.system = system_prompt
         except (AttributeError, TypeError):
             pass
+
+    optimization_answer = try_answer_optimization_question(
+        question, effective_root, index_meta, backend=backend_obj, num_predict=num_predict
+    )
+    if optimization_answer is not None:
+        return optimization_answer, []
 
     direct_file_answer = try_answer_file_content_question(
         question,
