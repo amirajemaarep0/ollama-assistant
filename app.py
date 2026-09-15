@@ -59,6 +59,16 @@ INDEX_LABEL_TO_MODE = {
     INDEX_LABELS[2]: "both",
 }
 
+def format_duration(seconds: float) -> str:
+    """Readable elapsed time. Sub-second answers skipped the model entirely."""
+    if seconds < 1:
+        return f"{seconds * 1000:.0f} ms"
+    if seconds < 60:
+        return f"{seconds:.1f} s"
+    minutes, rest = divmod(seconds, 60)
+    return f"{int(minutes)} min {rest:.0f} s"
+
+
 def backend_config() -> dict:
     """Current backend settings, as kwargs for get_backend()."""
     return {
@@ -198,6 +208,7 @@ with st.sidebar:
                 st.error(f"❌ Path is not a directory: {path_input}")
             else:
                 st.session_state.repo_path = path_input
+                index_started = time.perf_counter()
                 with st.spinner("📊 Indexing codebase... This might take a minute."):
                     try:
                         vs, meta, result = get_vectorstore(path_input, index_mode)
@@ -211,7 +222,8 @@ with st.sidebar:
                                 st.session_state.indexed_files_count = len(meta.get("indexed_files", []))
                             st.success(
                                 f"✅ Indexed {st.session_state.indexed_files_count} file(s) for search "
-                                f"({len(meta.get('all_files', [])) if meta else 0} total in folder)."
+                                f"({len(meta.get('all_files', [])) if meta else 0} total in folder) "
+                                f"in {format_duration(time.perf_counter() - index_started)}."
                             )
                         else:
                             st.error(f"❌ Error indexing: {result}")
@@ -391,6 +403,7 @@ if "current_prompt" in st.session_state and st.session_state.current_prompt:
                         open_file_text = ""
 
                 # Query with RAG
+                started = time.perf_counter()
                 response, docs = query_llm(
                     st.session_state.vs,
                     prompt,
@@ -406,7 +419,10 @@ if "current_prompt" in st.session_state and st.session_state.current_prompt:
                     open_file_text=open_file_text,
                     index_meta=st.session_state.index_meta,
                 )
-                st.session_state.chat_history.append({"role": "assistant", "content": response, "docs": docs})
+                elapsed = time.perf_counter() - started
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": response, "docs": docs, "elapsed": elapsed}
+                )
             except Exception as e:
                 err = str(e).lower()
                 if any(
@@ -480,6 +496,10 @@ else:
     for i, msg in enumerate(st.session_state.chat_history):
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
+            if msg.get("elapsed") is not None:
+                taken = format_duration(msg["elapsed"])
+                how = "answered without the model" if msg["elapsed"] < 1 else f"{st.session_state.ollama_model}"
+                st.caption(f"⏱️ {taken} · {how}")
             if msg["role"] == "assistant" and "docs" in msg and msg["docs"]:
                 with st.expander(f"📄 Retrieved {len(msg['docs'])} snippets (from indexed files)"):
                     for j, doc in enumerate(msg["docs"], 1):
