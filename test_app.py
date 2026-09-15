@@ -319,3 +319,69 @@ def test_cleanup_only_findings_do_not_hijack_a_soft_question(tmp_path):
     assert try_answer_syntax_question("What is wrong with tidy.py?", str(tmp_path), meta) is None
     explicit = try_answer_syntax_question("Check tidy.py for syntax errors", str(tmp_path), meta)
     assert explicit is not None and "sys" in explicit
+
+
+def test_project_overview_question_triggers_only_for_whole_project():
+    from rag_backend import is_project_overview_question as Q
+
+    assert Q("Scan the whole project")
+    assert Q("What does this project do?")
+    assert Q("Give me an overview of the codebase")
+    assert Q("Explain the architecture")
+    assert not Q("What does app.py do?")
+    assert not Q("How does record_audio work?")
+
+
+def test_build_project_outline_covers_every_file(tmp_path):
+    from rag_backend import build_project_outline
+
+    (tmp_path / "a.py").write_text('"""Module A."""\nclass Foo:\n    def bar(self, x):\n        pass\n', encoding="utf-8")
+    (tmp_path / "b.py").write_text("def helper(y):\n    return y\n", encoding="utf-8")
+    (tmp_path / "c.py").write_text("x = 1\n", encoding="utf-8")
+    meta = {"root": str(tmp_path), "all_files": ["a.py", "b.py", "c.py"]}
+
+    outline = build_project_outline(str(tmp_path), meta)
+    for name in ("a.py", "b.py", "c.py"):
+        assert f"### FILE: {name}" in outline
+    assert "class Foo" in outline
+    assert "def bar(self, x)" in outline
+    assert "def helper(y)" in outline
+    assert "Module A." in outline
+
+
+def test_outline_survives_a_file_that_cannot_be_parsed(tmp_path):
+    from rag_backend import build_project_outline
+
+    (tmp_path / "ok.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    (tmp_path / "bad.py").write_text("def f(:\n", encoding="utf-8")
+    meta = {"root": str(tmp_path), "all_files": ["ok.py", "bad.py"]}
+
+    outline = build_project_outline(str(tmp_path), meta)
+    assert "### FILE: ok.py" in outline
+    assert "### FILE: bad.py" in outline
+    assert "cannot parse" in outline
+
+
+def test_query_llm_sends_every_file_for_a_whole_project_question(tmp_path):
+    """Regression: retrieval returned only k chunks, so most files never reached
+    the model on a 'scan the whole project' question."""
+    from rag_backend import query_llm
+
+    for name in ("one.py", "two.py", "three.py", "four.py"):
+        (tmp_path / name).write_text(f"def fn_{name[:-3]}():\n    pass\n", encoding="utf-8")
+    meta = {"root": str(tmp_path), "all_files": ["one.py", "two.py", "three.py", "four.py"]}
+
+    captured = {}
+
+    class Spy:
+        system = None
+
+        def query(self, prompt, max_tokens=512):
+            captured["prompt"] = prompt
+            return "ok"
+
+    query_llm(None, "Scan the whole project", backend=Spy(),
+              index_meta=meta, project_root=str(tmp_path))
+
+    for name in ("one.py", "two.py", "three.py", "four.py"):
+        assert f"### FILE: {name}" in captured["prompt"]

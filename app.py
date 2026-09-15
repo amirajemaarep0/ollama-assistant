@@ -272,7 +272,8 @@ Neither runs your code, so logic errors are not covered.
 **🔍 Shows its sources**
 
 Each answer names the files it used. Expand *Retrieved snippets* under an
-answer to read the exact passages it was given.
+answer to read the exact passages it was given. Ordinary questions retrieve
+only the closest few chunks — ask about the *whole project* to cover them all.
 
 **🔒 Runs fully offline**
 
@@ -284,11 +285,12 @@ No code or document leaves this computer.
     with ask_col:
         st.markdown(
             """
-**Four kinds of question it recognises**
+**Five kinds of question it recognises**
 
 | Ask it | What happens |
 | --- | --- |
 | *List all files in the project* | Instant file inventory, no model needed |
+| *Scan the whole project* | Outlines **every** file, not just the closest matches |
 | *What is wrong with app.py?* | Parses it, points at syntax errors and undefined names, no model needed |
 | *What does app.py do?* | Reads that file and explains it |
 | *How does the indexing work?* | Searches the index, answers from the best matches |

@@ -508,6 +508,88 @@ def try_answer_syntax_question(
     return None
 
 
+_OVERVIEW_PATTERNS = re.compile(
+    r"\b("
+    r"whole\s+project|entire\s+project|all\s+(?:the\s+)?(?:files|code|modules)|"
+    r"scan\s+(?:the\s+)?(?:whole\s+|entire\s+)?(?:project|codebase|repo)|"
+    r"overview|outline|architecture|structure|high[-\s]?level|"
+    r"what\s+does\s+(?:this|the)\s+(?:project|codebase|app|application)\s+do|"
+    r"summar(?:y|ise|ize)\s+(?:of\s+)?(?:the\s+)?(?:whole\s+|entire\s+)?(?:project|codebase)|"
+    r"tout\s+le\s+projet|vue\s+d.ensemble|architecture\s+du\s+projet|structure\s+du\s+projet"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_project_overview_question(question: str) -> bool:
+    """True for 'scan the whole project', 'what does this project do', etc."""
+    return bool(_OVERVIEW_PATTERNS.search(question))
+
+
+def _outline_one_file(source: str, rel_path: str, max_members: int = 40) -> str:
+    """A compact signature-level outline of one module."""
+    try:
+        tree = ast.parse(source, filename=rel_path)
+    except (SyntaxError, ValueError) as exc:
+        return f"### FILE: {rel_path}\n(cannot parse: {exc})"
+
+    lines = [f"### FILE: {rel_path}"]
+    doc = ast.get_docstring(tree)
+    if doc:
+        lines.append(f'"""{doc.strip().splitlines()[0]}"""')
+
+    def signature(node) -> str:
+        args = [a.arg for a in node.args.args]
+        if node.args.vararg:
+            args.append("*" + node.args.vararg.arg)
+        if node.args.kwarg:
+            args.append("**" + node.args.kwarg.arg)
+        prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+        return f"{prefix} {node.name}({', '.join(args)})"
+
+    count = 0
+    for node in tree.body:
+        if count >= max_members:
+            lines.append("    ... (truncated)")
+            break
+        if isinstance(node, ast.ClassDef):
+            bases = ", ".join(b.id for b in node.bases if isinstance(b, ast.Name))
+            lines.append(f"class {node.name}({bases})" if bases else f"class {node.name}")
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    lines.append("    " + signature(sub))
+                    count += 1
+            count += 1
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            lines.append(signature(node))
+            count += 1
+
+    if len(lines) == 1:
+        lines.append("(no classes or functions)")
+    return "\n".join(lines)
+
+
+def build_project_outline(
+    project_root: str,
+    index_meta: dict[str, Any] | None,
+    max_files: int = 60,
+) -> str:
+    """Signature-level outline of EVERY Python file, not just retrieved chunks.
+
+    Vector search returns the k chunks nearest the question, so a whole-project
+    question saw only a few files. This covers all of them at a fraction of the
+    size of their contents.
+    """
+    files = list(_resolve_python_files(project_root, [], index_meta))
+    if not files:
+        return ""
+
+    blocks = [_outline_one_file(source, rel) for rel, source in files[:max_files]]
+    if len(files) > max_files:
+        blocks.append(f"... and {len(files) - max_files} more Python file(s) not outlined.")
+    return "\n\n".join(blocks)
+
+
 def build_index_meta(
     repo_path: str,
     index_mode: IndexMode,
@@ -526,11 +608,11 @@ def build_index_meta(
 
 
 def format_file_inventory_answer(meta: dict[str, Any]) -> str:
-    root = meta["root"]
-    mode = meta["index_mode"]
-    indexed = meta["indexed_files"]
-    all_files = meta["all_files"]
-    not_indexed = meta["not_indexed_files"]
+    root = meta.get("root", "(unknown)")
+    mode = meta.get("index_mode", "unknown")
+    indexed = meta.get("indexed_files") or []
+    all_files = meta.get("all_files") or []
+    not_indexed = meta.get("not_indexed_files") or []
 
     lines = [
         f"**Project root:** `{root}`",
@@ -570,10 +652,12 @@ def format_file_inventory_answer(meta: dict[str, Any]) -> str:
 def inventory_context_for_prompt(meta: dict[str, Any] | None, max_listed: int = 120) -> str:
     if not meta:
         return ""
-    indexed = meta["indexed_files"]
-    all_files = meta["all_files"]
+    # Tolerate a partial meta: a missing key must not sink the whole answer.
+    indexed = meta.get("indexed_files") or []
+    all_files = meta.get("all_files") or []
+    mode = meta.get("index_mode", "unknown")
     lines = [
-        f"Project file inventory: {len(all_files)} file(s) total, {len(indexed)} indexed (mode={meta['index_mode']}).",
+        f"Project file inventory: {len(all_files)} file(s) total, {len(indexed)} indexed (mode={mode}).",
         "Indexed paths:",
     ]
     for path in indexed[:max_listed]:
@@ -824,6 +908,16 @@ def query_llm(
     else:
         docs = []
         context = "No indexed project excerpts available."
+
+    # A whole-project question must not be answered from the k nearest chunks.
+    if effective_root and is_project_overview_question(question):
+        outline = build_project_outline(effective_root, index_meta)
+        if outline:
+            context = (
+                "Signature-level outline of EVERY Python file in the project:"
+                + chr(10) + chr(10) + outline
+            )
+            docs = []
 
     mentioned = extract_mentioned_files(question)
     if effective_root:
