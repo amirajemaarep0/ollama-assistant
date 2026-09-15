@@ -1,4 +1,5 @@
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -245,33 +246,6 @@ with st.sidebar:
             st.cache_resource.clear()
             st.rerun()
             
-    st.markdown("---")
-    st.header("🎙️ Voice Input")
-    st.write("Click 'Record' and speak your question.")
-    
-    duration = st.slider("Recording Duration (sec)", min_value=3, max_value=15, value=5, help="Adjust based on question length")
-    record_col, paste_col = st.columns(2)
-    with record_col:
-        if st.button(f"🔴 Record ({duration}s)", use_container_width=True):
-            try:
-                with st.spinner("⏳ Loading speech model (first use may take a moment)..."):
-                    from voice_stt import record_audio, transcribe_audio
-                with st.spinner("🎤 Recording... Please speak now."):
-                    audio_file = record_audio(duration=duration)
-                with st.spinner("⏳ Transcribing..."):
-                    text = transcribe_audio(audio_file)
-                    if text and text.strip():
-                        st.session_state.current_prompt = text
-                        st.success(f"✅ Transcribed: {text[:100]}...")
-                    else:
-                        st.warning("⚠️ Could not transcribe any speech. Try again.")
-            except Exception as e:
-                st.error(f"❌ Recording error: {str(e)[:150]}")
-    
-    with paste_col:
-        if st.button("📋 Paste from clipboard", use_container_width=True, help="Copy text and paste it here"):
-            st.info("💡 Type your question in the text input field below.")
-
 # Open by default until something is indexed, then get out of the way.
 with st.expander("ℹ️ What this app can do", expanded=st.session_state.vs is None):
     what_col, ask_col = st.columns(2)
@@ -286,7 +260,8 @@ Python files, documents (`.pdf`, `.md`, `.txt`, `.rst`), or both.
 
 **🎙️ Takes voice or typed questions**
 
-Recordings are transcribed on this machine by Whisper. No microphone? Just type.
+Press the 🎙 mic in the chat bar below, next to the send arrow, and speak.
+Whisper transcribes it on this machine. No microphone? Just type.
 
 **🩺 Checks Python syntax**
 
@@ -330,9 +305,39 @@ No code or document leaves this computer.
 if st.session_state.vs is None:
     st.info("👈 **Step 1:** Index a directory in the sidebar | **Step 2:** Ask a question below")
 
-text_input = st.chat_input("Type your question here or use voice input above...")
-if text_input:
-    st.session_state.current_prompt = text_input.strip()
+# accept_audio puts a microphone button inside the chat bar, right beside the
+# send arrow. Recording happens in the browser, so no microphone access is
+# needed on the server and there is no fixed recording length any more.
+user_input = st.chat_input(
+    "Type your question, or press the mic to ask out loud...",
+    accept_audio=True,
+    audio_sample_rate=16000,
+)
+
+if user_input is not None:
+    typed = (getattr(user_input, "text", None) or "").strip()
+    recording = getattr(user_input, "audio", None)
+    spoken = ""
+
+    if recording is not None:
+        try:
+            with st.spinner("⏳ Transcribing your recording..."):
+                from voice_stt import transcribe_audio
+
+                clip = os.path.join(tempfile.gettempdir(), "chat_recording.wav")
+                with open(clip, "wb") as handle:
+                    handle.write(recording.getvalue())
+                spoken = (transcribe_audio(clip) or "").strip()
+            if spoken:
+                st.success(f"🎙️ Heard: {spoken}")
+            else:
+                st.warning("⚠️ Could not make out any speech. Try recording again.")
+        except Exception as e:
+            st.error(f"❌ Transcription failed: {str(e)[:200]}")
+
+    question = " ".join(part for part in (typed, spoken) if part)
+    if question:
+        st.session_state.current_prompt = question
 
 # Main Chat Interface
 if "current_prompt" in st.session_state and st.session_state.current_prompt:
