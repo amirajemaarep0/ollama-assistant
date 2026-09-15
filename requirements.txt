@@ -20,6 +20,10 @@ sounddevice
 numpy
 scipy
 
+# Code checking (optional: the syntax check works without it, but undefined
+# names and unused imports are only reported when pyflakes is installed)
+pyflakes
+
 # Tests
 pytest
 

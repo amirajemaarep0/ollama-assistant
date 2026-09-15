@@ -263,10 +263,11 @@ Python files, documents (`.pdf`, `.md`, `.txt`, `.rst`), or both.
 Press the 🎙 mic in the chat bar below, next to the send arrow, and speak.
 Whisper transcribes it on this machine. No microphone? Just type.
 
-**🩺 Checks Python syntax**
+**🩺 Checks your Python**
 
-Uses Python's own parser, not the model, so it is instant and exact
-and gives you the line number.
+Python's own parser finds syntax errors; pyflakes finds undefined names
+and unused imports. No model involved, so it is instant and exact.
+Neither runs your code, so logic errors are not covered.
 
 **🔍 Shows its sources**
 
@@ -288,7 +289,7 @@ No code or document leaves this computer.
 | Ask it | What happens |
 | --- | --- |
 | *List all files in the project* | Instant file inventory, no model needed |
-| *What is wrong with app.py?* | Parses it and points at the syntax error, no model needed |
+| *What is wrong with app.py?* | Parses it, points at syntax errors and undefined names, no model needed |
 | *What does app.py do?* | Reads that file and explains it |
 | *How does the indexing work?* | Searches the index, answers from the best matches |
 

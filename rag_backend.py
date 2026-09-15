@@ -379,6 +379,93 @@ def format_syntax_report(problems: list[dict[str, Any]], checked: list[str]) -> 
     return "\n".join(lines).rstrip()
 
 
+# Pyflakes message classes that are tidiness rather than likely bugs. Anything
+# not in this set is reported as a probable bug, so message types added by a
+# future pyflakes surface instead of being buried in the cleanup section.
+_QUALITY_CLEANUP = frozenset(
+    {
+        "UnusedImport",
+        "UnusedVariable",
+        "UnusedAnnotation",
+        "UnusedIndirectAssignment",
+        "RedefinedWhileUnused",
+        "ImportStarUsed",
+        "FStringMissingPlaceholders",
+        "TStringMissingPlaceholders",
+    }
+)
+
+
+def check_python_quality(source: str, rel_path: str) -> list[dict[str, Any]]:
+    """Undefined names, unused imports and similar, using pyflakes.
+
+    Returns [] when pyflakes is not installed, so the syntax check keeps working
+    on its own and pyflakes stays an optional extra rather than a hard
+    dependency. Also returns [] for unparseable source: the caller reports the
+    syntax error for that file instead.
+    """
+    try:
+        from pyflakes.checker import Checker
+    except ImportError:
+        return []
+
+    try:
+        tree = ast.parse(source, filename=rel_path)
+    except (SyntaxError, ValueError):
+        return []
+
+    findings: list[dict[str, Any]] = []
+    for message in Checker(tree, filename=rel_path).messages:
+        kind = type(message).__name__
+        try:
+            text = message.message % message.message_args
+        except Exception:
+            text = str(message)
+        findings.append(
+            {
+                "path": rel_path,
+                "line": message.lineno,
+                "kind": kind,
+                "msg": text,
+                "is_bug": kind not in _QUALITY_CLEANUP,
+            }
+        )
+    findings.sort(key=lambda f: (not f["is_bug"], f["path"], f["line"]))
+    return findings
+
+
+def format_quality_report(findings: list[dict[str, Any]], checked: list[str]) -> str:
+    bugs = [f for f in findings if f["is_bug"]]
+    tidy = [f for f in findings if not f["is_bug"]]
+    scope = f"`{checked[0]}`" if len(checked) == 1 else f"{len(checked)} Python file(s)"
+
+    lines: list[str] = []
+    if bugs:
+        lines.append(f"⚠️ No syntax errors in {scope}, but found **{len(bugs)}** likely bug(s):")
+        lines.append("")
+        for f in bugs:
+            lines.append(f"- **`{f['path']}`** line {f['line']}: {f['msg']}")
+        lines.append("")
+    else:
+        lines.append(f"✅ No syntax errors and no likely bugs in {scope}.")
+        lines.append("")
+
+    if tidy:
+        lines.append(f"<details><summary>{len(tidy)} cleanup suggestion(s)</summary>")
+        lines.append("")
+        for f in tidy:
+            lines.append(f"- `{f['path']}` line {f['line']}: {f['msg']}")
+        lines.append("")
+        lines.append("</details>")
+
+    lines.append("")
+    lines.append(
+        "_Checked with Python's parser and pyflakes. Neither runs your code, so "
+        "logic errors (wrong result, off-by-one, division by zero) are not covered._"
+    )
+    return "\n".join(lines).rstrip()
+
+
 def try_answer_syntax_question(
     question: str,
     project_root: str | None,
@@ -399,17 +486,26 @@ def try_answer_syntax_question(
     named = extract_mentioned_files(question)
     checked: list[str] = []
     problems: list[dict[str, Any]] = []
+    quality: list[dict[str, Any]] = []
     for rel, source in _resolve_python_files(root, named, index_meta):
         checked.append(rel)
         problem = check_python_syntax(source, rel)
         if problem:
             problems.append(problem)
+        else:
+            quality.extend(check_python_quality(source, rel))
 
     if not checked:
         return None
-    if not problems and not _SYNTAX_EXPLICIT.search(question):
-        return None
-    return format_syntax_report(problems, checked)
+    if problems:
+        return format_syntax_report(problems, checked)
+
+    # Nothing unparseable. An undefined name is still the answer to "what is
+    # wrong with x.py", so report bugs; stay quiet about mere tidiness unless
+    # the user explicitly asked for a check.
+    if any(f["is_bug"] for f in quality) or _SYNTAX_EXPLICIT.search(question):
+        return format_quality_report(quality, checked)
+    return None
 
 
 def build_index_meta(
