@@ -315,6 +315,77 @@ def check_python_syntax(source: str, rel_path: str) -> dict[str, Any] | None:
         return {"path": rel_path, "line": None, "offset": None, "msg": str(exc), "text": ""}
 
 
+def _parso_error_lines(source: str, rel_path: str) -> list[tuple[int, str]]:
+    """(line, message) for every syntax error parso can recover from.
+
+    Returns [] when parso is not installed, so ast stays the baseline and parso
+    is an optional upgrade.
+    """
+    try:
+        import parso
+    except ImportError:
+        return []
+    try:
+        grammar = parso.load_grammar()
+        tree = grammar.parse(source)
+        found = [(e.start_pos[0], e.message) for e in grammar.iter_errors(tree)]
+    except Exception:
+        return []
+    found.sort(key=lambda item: item[0])
+    return found
+
+
+def _cluster_error_lines(
+    errors: list[tuple[int, str]], gap: int = 3
+) -> list[tuple[int, str]]:
+    """Collapse runs of nearby errors to their first line.
+
+    A single mistake usually makes a recovering parser complain on several
+    consecutive lines, so lines within `gap` of the previous one are treated as
+    knock-on effects of the same problem rather than separate errors.
+    """
+    clusters: list[tuple[int, str]] = []
+    previous: int | None = None
+    for line, message in errors:
+        # Compare against the previous error line, not the cluster's first line:
+        # a cascade walks down the file one or two lines at a time.
+        if previous is not None and line - previous <= gap:
+            previous = line
+            continue
+        clusters.append((line, message))
+        previous = line
+    return clusters
+
+
+def check_python_syntax_all(source: str, rel_path: str) -> list[dict[str, Any]]:
+    """Every distinct syntax problem in one file, best-effort.
+
+    CPython's parser stops at the first error but gives the clearest message, so
+    it provides the first entry. parso recovers and keeps going, so it supplies
+    the later ones - clustered, because a recovering parser cascades.
+    """
+    first = check_python_syntax(source, rel_path)
+    if first is None:
+        return []
+
+    results = [first]
+    first_line = first["line"] or 0
+    for line, message in _cluster_error_lines(_parso_error_lines(source, rel_path)):
+        if line <= first_line + 3:
+            continue  # same problem CPython already reported, more precisely
+        results.append(
+            {
+                "path": rel_path,
+                "line": line,
+                "offset": None,
+                "msg": message.replace("SyntaxError: ", "").replace("IndentationError: ", ""),
+                "text": "",
+                "recovered": True,
+            }
+        )
+    return results
+
+
 def _resolve_python_files(project_root: str, names: list[str], index_meta: dict[str, Any] | None):
     """Yield (rel_path, source) for the named .py files, or for every indexed .py."""
     root = os.path.abspath(project_root)
@@ -357,13 +428,20 @@ def format_syntax_report(problems: list[dict[str, Any]], checked: list[str]) -> 
             return f"✅ `{checked[0]}` has no syntax errors. It parses cleanly."
         return f"✅ No syntax errors. All **{len(checked)}** Python file(s) parse cleanly."
 
-    lines = [
-        f"❌ Found a syntax error in **{len(problems)}** of {len(checked)} Python file(s) checked.",
-        "",
-    ]
+    broken_files = {p["path"] for p in problems}
+    extra = sum(1 for p in problems if p.get("recovered"))
+    headline = (
+        f"❌ Found syntax errors in **{len(broken_files)}** of {len(checked)} "
+        "Python file(s) checked."
+    )
+    if extra:
+        headline += f" {len(problems)} problem area(s) in total."
+    lines = [headline, ""]
     for p in problems:
         where = f"line {p['line']}" if p["line"] else "unknown line"
-        lines.append(f"**`{p['path']}`** — {where}: {p['msg']}")
+        marker = "↳ also" if p.get("recovered") else "**`" + p["path"] + "`** —"
+        lines.append(f"{marker} {where}: {p['msg']}" if p.get("recovered")
+                     else f"**`{p['path']}`** — {where}: {p['msg']}")
         if p["text"]:
             lines.append("")
             lines.append("```python")
@@ -373,9 +451,16 @@ def format_syntax_report(problems: list[dict[str, Any]], checked: list[str]) -> 
             lines.append("```")
         lines.append("")
 
-    clean = len(checked) - len(problems)
+    clean = len(checked) - len(broken_files)
     if clean:
         lines.append(f"_The other {clean} file(s) parse cleanly._")
+    if extra:
+        lines.append("")
+        lines.append(
+            "_Python stops at the first error, so the ones marked with an arrow come "
+            "from a recovering parser and may be knock-on effects. Fix the first error "
+            "in a file and ask again for exact messages on the rest._"
+        )
     return "\n".join(lines).rstrip()
 
 
@@ -489,9 +574,9 @@ def try_answer_syntax_question(
     quality: list[dict[str, Any]] = []
     for rel, source in _resolve_python_files(root, named, index_meta):
         checked.append(rel)
-        problem = check_python_syntax(source, rel)
-        if problem:
-            problems.append(problem)
+        found = check_python_syntax_all(source, rel)
+        if found:
+            problems.extend(found)
         else:
             quality.extend(check_python_quality(source, rel))
 

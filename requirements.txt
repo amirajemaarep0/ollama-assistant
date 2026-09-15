@@ -20,9 +20,10 @@ sounddevice
 numpy
 scipy
 
-# Code checking (optional: the syntax check works without it, but undefined
-# names and unused imports are only reported when pyflakes is installed)
-pyflakes
+# Code checking. Both are optional: the syntax check falls back to Python's own
+# parser alone without them.
+pyflakes                   # undefined names, unused imports
+parso                      # recovers after a syntax error to find later ones
 
 # Tests
 pytest

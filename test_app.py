@@ -385,3 +385,58 @@ def test_query_llm_sends_every_file_for_a_whole_project_question(tmp_path):
 
     for name in ("one.py", "two.py", "three.py", "four.py"):
         assert f"### FILE: {name}" in captured["prompt"]
+
+
+def test_check_python_syntax_all_finds_more_than_the_first_error(tmp_path):
+    """ast.parse stops at the first error; a recovering parser continues."""
+    from rag_backend import check_python_syntax_all
+
+    source = (
+        "def one():\n"
+        "    print('a'\n"
+        "\n\n"
+        "def two():\n"
+        "    if True\n"
+        "        pass\n"
+        "\n\n"
+        "def three():\n"
+        "    for x in [1, 2\n"
+        "        print(x)\n"
+    )
+    found = check_python_syntax_all(source, "multi.py")
+    assert len(found) >= 2, "should report more than the first error"
+    assert found[0]["line"] < found[-1]["line"]
+    assert not found[0].get("recovered"), "first entry keeps CPython's exact message"
+    assert found[-1].get("recovered")
+
+
+def test_single_error_file_reports_exactly_one_problem():
+    """A recovering parser cascades; clustering must not invent extra errors."""
+    from rag_backend import check_python_syntax_all
+
+    source = (
+        "def summarise(rows):\n"
+        "    out = []\n"
+        "    for key, value in rows.items()\n"
+        "        out.append(key)\n"
+        "        out.append(value)\n"
+        "\n"
+        "    return out\n"
+    )
+    assert len(check_python_syntax_all(source, "one.py")) == 1
+
+
+def test_check_python_syntax_all_is_empty_for_valid_code():
+    from rag_backend import check_python_syntax_all
+
+    assert check_python_syntax_all("def f(x):\n    return x\n", "ok.py") == []
+
+
+def test_cluster_error_lines_walks_from_the_previous_line():
+    from rag_backend import _cluster_error_lines
+
+    runs = [(9, "a"), (10, "b"), (11, "c"), (13, "d"), (14, "e")]
+    assert _cluster_error_lines(runs) == [(9, "a")]
+
+    separated = [(5, "a"), (6, "b"), (7, "c"), (20, "d")]
+    assert [line for line, _ in _cluster_error_lines(separated)] == [5, 20]
