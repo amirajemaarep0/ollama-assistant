@@ -451,12 +451,12 @@ def format_quality_report(findings: list[dict[str, Any]], checked: list[str]) ->
         lines.append("")
 
     if tidy:
-        lines.append(f"<details><summary>{len(tidy)} cleanup suggestion(s)</summary>")
+        # Plain markdown only: st.write escapes HTML, so a <details> block would
+        # render as literal tags in the chat.
+        lines.append(f"**Also {len(tidy)} cleanup suggestion(s):**")
         lines.append("")
         for f in tidy:
             lines.append(f"- `{f['path']}` line {f['line']}: {f['msg']}")
-        lines.append("")
-        lines.append("</details>")
 
     lines.append("")
     lines.append(
