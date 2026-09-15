@@ -545,3 +545,34 @@ def test_verify_optimized_function_notices_a_renamed_function():
     reply = "```python\ndef something_else(x):\n    return x\n```"
     note = verify_optimized_function(reply, "f")
     assert "not `f`" in note
+
+
+def test_scan_intent_reaches_the_checker_without_the_word_syntax():
+    """Regression: "scan for errors in the project" required the literal word
+    "syntax", so it fell through to retrieval and answered from 3 chunks."""
+    from rag_backend import is_syntax_check_question as Q
+
+    for question in (
+        "scan for errors in the project",
+        "check the project for errors",
+        "find all errors",
+        "find any issues in the code",
+        "any bugs?",
+        "list all the errors",
+        "scanne le projet pour des erreurs",
+    ):
+        assert Q(question), question
+
+
+def test_questions_about_error_handling_are_not_scans():
+    """A question about how code behaves must not trigger a project scan."""
+    from rag_backend import is_syntax_check_question as Q
+
+    for question in (
+        "how does the project handle errors?",
+        "How does app.py handle errors",
+        "explain the error handling in rag_backend.py",
+        "why does this fail at runtime",
+        "describe the error messages",
+    ):
+        assert not Q(question), question

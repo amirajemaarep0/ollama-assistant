@@ -348,13 +348,51 @@ _PROJECT_SCOPE = re.compile(
 )
 
 
+_ERROR_NOUNS = r"(?:errors?|bugs?|problems?|issues?|mistakes?|erreurs?|probl[eè]mes?|fautes?)"
+
+# A request to go and look: "scan for errors", "check the project for bugs",
+# "find all errors", "any problems?". The verb is what separates these from a
+# question about behaviour.
+_SCAN_INTENT = re.compile(
+    r"\b(?:scan|check|find|look|search|list|report|detect|show|spot|"
+    r"any|are\s+there|is\s+there|"
+    r"scanne[rz]?|v[ée]rifie[rz]?|cherche[rz]?|liste[rz]?|trouve[rz]?)\b"
+    r"[^.?!]{0,60}?\b" + _ERROR_NOUNS,
+    re.IGNORECASE,
+)
+
+# "how does X handle errors", "explain the error handling" - these ask about the
+# code's behaviour and must not kick off a scan.
+_EXPLANATORY = re.compile(
+    r"\b(?:how\s+(?:does|do|is|are|should)|explain|describe|why\s+(?:does|do|is|are)|"
+    r"what\s+happens|handle[sd]?\s+" + _ERROR_NOUNS + r"|"
+    r"comment\s+(?:est|sont|fait))\b",
+    re.IGNORECASE,
+)
+
+
 def is_syntax_check_question(question: str) -> bool:
-    """True for 'what is wrong with app.py', 'any syntax errors in the project', etc."""
+    """True for 'what is wrong with app.py', 'scan for errors in the project'.
+
+    False for 'how does the project handle errors?', which asks about behaviour
+    rather than requesting a scan.
+    """
+    if _EXPLANATORY.search(question):
+        return False
+
+    # "scan for errors", "find any issues" - a verb plus a problem noun is a
+    # request to look, and stands on its own without any other keyword.
+    if _SCAN_INTENT.search(question):
+        return True
+
     if not _SYNTAX_PATTERNS.search(question):
         return False
-    names_py = any(n.lower().endswith(".py") for n in extract_mentioned_files(question))
-    whole_project = bool(_PROJECT_SCOPE.search(question) and _SYNTAX_EXPLICIT.search(question))
-    return names_py or whole_project
+
+    if any(n.lower().endswith(".py") for n in extract_mentioned_files(question)):
+        return True
+
+    # No file named and no scan verb: only explicit syntax wording counts.
+    return bool(_PROJECT_SCOPE.search(question) and _SYNTAX_EXPLICIT.search(question))
 
 
 def check_python_syntax(source: str, rel_path: str) -> dict[str, Any] | None:
