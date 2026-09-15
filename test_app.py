@@ -208,3 +208,67 @@ def test_whisper_model_is_cached():
         voice_stt.get_model("base")
     assert mock_load.call_count == 1
     voice_stt._MODEL_CACHE.clear()
+
+
+def test_check_python_syntax_reports_location():
+    from rag_backend import check_python_syntax
+
+    assert check_python_syntax("x = 1\n", "ok.py") is None
+
+    problem = check_python_syntax("def f(name):\n    print('hi' + name\n", "bad.py")
+    assert problem is not None
+    assert problem["line"] == 2
+    assert "never closed" in problem["msg"]
+
+
+def test_syntax_question_triggers_only_when_it_should():
+    from rag_backend import is_syntax_check_question
+
+    assert is_syntax_check_question("What is wrong with app.py?")
+    assert is_syntax_check_question("Fix broken.py")
+    assert is_syntax_check_question("Are there syntax errors in the project?")
+    # No file named and no "syntax"/"compile" wording: this is a normal question.
+    assert not is_syntax_check_question("How does the app handle errors?")
+    assert not is_syntax_check_question("What does app.py do?")
+
+
+def test_try_answer_syntax_question_finds_the_error(tmp_path):
+    from rag_backend import try_answer_syntax_question
+
+    (tmp_path / "broken.py").write_text("def greet(name):\n    print('hi' + name\n", encoding="utf-8")
+    meta = {"root": str(tmp_path), "all_files": ["broken.py"]}
+
+    answer = try_answer_syntax_question("What is wrong with broken.py?", str(tmp_path), meta)
+    assert answer is not None
+    assert "broken.py" in answer
+    assert "line 2" in answer
+
+
+def test_try_answer_syntax_question_falls_through_when_file_is_clean(tmp_path):
+    """A clean file plus a soft trigger must reach the LLM, not answer 'no errors'."""
+    from rag_backend import try_answer_syntax_question
+
+    (tmp_path / "fine.py").write_text("x = 1\n", encoding="utf-8")
+    meta = {"root": str(tmp_path), "all_files": ["fine.py"]}
+
+    assert try_answer_syntax_question("What is wrong with fine.py?", str(tmp_path), meta) is None
+    # Explicit "syntax" wording still gets the all-clear.
+    explicit = try_answer_syntax_question("Any syntax errors in fine.py?", str(tmp_path), meta)
+    assert explicit is not None and "no syntax errors" in explicit.lower()
+
+
+def test_query_llm_answers_syntax_question_without_the_model(tmp_path):
+    from rag_backend import query_llm
+
+    (tmp_path / "broken.py").write_text("print('oops'\n", encoding="utf-8")
+    meta = {"root": str(tmp_path), "all_files": ["broken.py"]}
+    backend = MagicMock(spec=["query"])
+
+    response, docs = query_llm(
+        None, "What is wrong with broken.py?", backend=backend,
+        index_meta=meta, project_root=str(tmp_path),
+    )
+
+    assert "broken.py" in response
+    assert docs == []
+    backend.query.assert_not_called()

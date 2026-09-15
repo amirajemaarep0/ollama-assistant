@@ -1,3 +1,4 @@
+import ast
 import os
 import re
 from typing import Any, Literal
@@ -269,6 +270,148 @@ def load_mentioned_files_context(
     return "\n\n".join(parts)
 
 
+_SYNTAX_PATTERNS = re.compile(
+    r"\b("
+    r"syntax|syntaxe|compiles?|parses?|"
+    r"wrong|bugs?|errors?|broken|fails?|failing|fix|fixes|check|verify|invalid|"
+    r"erreurs?|probl[eè]mes?|corrige[rz]?|v[ée]rifie[rz]?|cass[ée]"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# "syntax"/"compile" wording is what licenses a whole-project scan; a bare
+# "how does the project handle errors?" must not trigger one.
+_SYNTAX_EXPLICIT = re.compile(r"\b(syntax|syntaxe|compiles?|parses?)\b", re.IGNORECASE)
+
+_PROJECT_SCOPE = re.compile(
+    r"\b(project|projet|codebase|all\s+(?:the\s+)?files|every\s+file|tout\s+le\s+code)\b",
+    re.IGNORECASE,
+)
+
+
+def is_syntax_check_question(question: str) -> bool:
+    """True for 'what is wrong with app.py', 'any syntax errors in the project', etc."""
+    if not _SYNTAX_PATTERNS.search(question):
+        return False
+    names_py = any(n.lower().endswith(".py") for n in extract_mentioned_files(question))
+    whole_project = bool(_PROJECT_SCOPE.search(question) and _SYNTAX_EXPLICIT.search(question))
+    return names_py or whole_project
+
+
+def check_python_syntax(source: str, rel_path: str) -> dict[str, Any] | None:
+    """Parse `source`; return error details, or None when it is valid Python."""
+    try:
+        ast.parse(source, filename=rel_path)
+        return None
+    except SyntaxError as exc:
+        return {
+            "path": rel_path,
+            "line": exc.lineno,
+            "offset": exc.offset,
+            "msg": exc.msg,
+            "text": (exc.text or "").rstrip("\n"),
+        }
+    except ValueError as exc:  # e.g. source containing null bytes
+        return {"path": rel_path, "line": None, "offset": None, "msg": str(exc), "text": ""}
+
+
+def _resolve_python_files(project_root: str, names: list[str], index_meta: dict[str, Any] | None):
+    """Yield (rel_path, source) for the named .py files, or for every indexed .py."""
+    root = os.path.abspath(project_root)
+    catalog = [f.replace("\\", "/") for f in (index_meta or {}).get("all_files", [])]
+
+    if names:
+        wanted = []
+        for name in names:
+            if not name.lower().endswith(".py"):
+                continue
+            basename = os.path.basename(name.lower())
+            matches = [
+                rel for rel in catalog
+                if rel.lower() == name.lower() or os.path.basename(rel).lower() == basename
+            ]
+            if not matches and os.path.isfile(os.path.join(root, name)):
+                matches = [name.replace("\\", "/")]
+            wanted.extend(matches[:1] or [])
+    else:
+        wanted = [rel for rel in catalog if rel.lower().endswith(".py")]
+
+    seen = set()
+    for rel in wanted:
+        if rel in seen:
+            continue
+        seen.add(rel)
+        full = os.path.join(root, rel.replace("/", os.sep))
+        if not os.path.isfile(full):
+            continue
+        try:
+            with open(full, encoding="utf-8", errors="ignore") as handle:
+                yield rel, handle.read()
+        except OSError:
+            continue
+
+
+def format_syntax_report(problems: list[dict[str, Any]], checked: list[str]) -> str:
+    if not problems:
+        if len(checked) == 1:
+            return f"✅ `{checked[0]}` has no syntax errors. It parses cleanly."
+        return f"✅ No syntax errors. All **{len(checked)}** Python file(s) parse cleanly."
+
+    lines = [
+        f"❌ Found a syntax error in **{len(problems)}** of {len(checked)} Python file(s) checked.",
+        "",
+    ]
+    for p in problems:
+        where = f"line {p['line']}" if p["line"] else "unknown line"
+        lines.append(f"**`{p['path']}`** — {where}: {p['msg']}")
+        if p["text"]:
+            lines.append("")
+            lines.append("```python")
+            lines.append(p["text"])
+            if p["offset"] and p["offset"] > 0:
+                lines.append(" " * (p["offset"] - 1) + "^")
+            lines.append("```")
+        lines.append("")
+
+    clean = len(checked) - len(problems)
+    if clean:
+        lines.append(f"_The other {clean} file(s) parse cleanly._")
+    return "\n".join(lines).rstrip()
+
+
+def try_answer_syntax_question(
+    question: str,
+    project_root: str | None,
+    index_meta: dict[str, Any] | None,
+) -> str | None:
+    """Answer syntax questions with Python's own parser - no model call.
+
+    Returns None to fall through to the LLM when nothing is broken and the user
+    did not explicitly ask about syntax (so "what is wrong with app.py" on a
+    clean file still gets a real discussion of its logic).
+    """
+    if not is_syntax_check_question(question):
+        return None
+    root = (project_root or (index_meta or {}).get("root") or "").strip()
+    if not root:
+        return None
+
+    named = extract_mentioned_files(question)
+    checked: list[str] = []
+    problems: list[dict[str, Any]] = []
+    for rel, source in _resolve_python_files(root, named, index_meta):
+        checked.append(rel)
+        problem = check_python_syntax(source, rel)
+        if problem:
+            problems.append(problem)
+
+    if not checked:
+        return None
+    if not problems and not _SYNTAX_EXPLICIT.search(question):
+        return None
+    return format_syntax_report(problems, checked)
+
+
 def build_index_meta(
     repo_path: str,
     index_mode: IndexMode,
@@ -531,6 +674,11 @@ def query_llm(
         return format_file_inventory_answer(index_meta), []
 
     effective_root = (project_root or (index_meta or {}).get("root") or "").strip()
+
+    # Python's own parser is exact and instant, so try it before any model call.
+    syntax_answer = try_answer_syntax_question(question, effective_root, index_meta)
+    if syntax_answer is not None:
+        return syntax_answer, []
 
     system_prompt = _system_prompt_for_mode(index_mode)
 

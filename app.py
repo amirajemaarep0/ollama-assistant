@@ -288,6 +288,11 @@ Python files, documents (`.pdf`, `.md`, `.txt`, `.rst`), or both.
 
 Recordings are transcribed on this machine by Whisper. No microphone? Just type.
 
+**🩺 Checks Python syntax**
+
+Uses Python's own parser, not the model, so it is instant and exact
+and gives you the line number.
+
 **🔍 Shows its sources**
 
 Each answer names the files it used. Expand *Retrieved snippets* under an
@@ -303,11 +308,12 @@ No code or document leaves this computer.
     with ask_col:
         st.markdown(
             """
-**Three kinds of question it recognises**
+**Four kinds of question it recognises**
 
 | Ask it | What happens |
 | --- | --- |
 | *List all files in the project* | Instant file inventory, no model needed |
+| *What is wrong with app.py?* | Parses it and points at the syntax error, no model needed |
 | *What does app.py do?* | Reads that file and explains it |
 | *How does the indexing work?* | Searches the index, answers from the best matches |
 
@@ -316,6 +322,7 @@ No code or document leaves this computer.
 - Works in English and French (*quels fichiers*, *contenu de…*).
 - **Open code file path** injects the file you are editing into every question.
 - **Export Chat** saves the whole conversation as a text file.
+- Read-only: it explains and diagnoses, it never edits your files.
 """
         )
 
