@@ -272,6 +272,54 @@ with st.sidebar:
         if st.button("📋 Paste from clipboard", use_container_width=True, help="Copy text and paste it here"):
             st.info("💡 Type your question in the text input field below.")
 
+# Open by default until something is indexed, then get out of the way.
+with st.expander("ℹ️ What this app can do", expanded=st.session_state.vs is None):
+    what_col, ask_col = st.columns(2)
+
+    with what_col:
+        st.markdown(
+            """
+**📂 Indexes a project folder**
+
+Python files, documents (`.pdf`, `.md`, `.txt`, `.rst`), or both.
+`venv`, `.git`, `node_modules` and caches are skipped automatically.
+
+**🎙️ Takes voice or typed questions**
+
+Recordings are transcribed on this machine by Whisper. No microphone? Just type.
+
+**🔍 Shows its sources**
+
+Each answer names the files it used. Expand *Retrieved snippets* under an
+answer to read the exact passages it was given.
+
+**🔒 Runs fully offline**
+
+Ollama, Whisper and the embeddings all run locally.
+No code or document leaves this computer.
+"""
+        )
+
+    with ask_col:
+        st.markdown(
+            """
+**Three kinds of question it recognises**
+
+| Ask it | What happens |
+| --- | --- |
+| *List all files in the project* | Instant file inventory, no model needed |
+| *What does app.py do?* | Reads that file and explains it |
+| *How does the indexing work?* | Searches the index, answers from the best matches |
+
+**Also**
+
+- Works in English and French (*quels fichiers*, *contenu de…*).
+- **Open code file path** injects the file you are editing into every question.
+- **Export Chat** saves the whole conversation as a text file.
+"""
+        )
+
+
 if st.session_state.vs is None:
     st.info("👈 **Step 1:** Index a directory in the sidebar | **Step 2:** Ask a question below")
 
