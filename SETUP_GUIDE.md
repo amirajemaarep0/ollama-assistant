@@ -95,5 +95,20 @@ directly, so FFmpeg is not required.
 ## 🧪 Tests
 
 ```bash
-pytest test_app.py
+pytest
 ```
+
+The suite lives in `tests/`, split by concern:
+
+| File | Covers |
+|---|---|
+| `test_voice_stt.py` | transcription and Whisper model caching |
+| `test_llm_backends.py` | the Ollama client wrapper |
+| `test_indexing.py` | project walking, exclusions, the AST outline |
+| `test_syntax_checks.py` | syntax errors, exact positions, the repair loop |
+| `test_static_analysis.py` | undefined names and cleanup findings |
+| `test_question_routing.py` | which handler a question reaches |
+| `test_optimization.py` | function rewriting and its verification |
+| `test_query_pipeline.py` | `query_llm` end to end |
+
+Run one file with `pytest tests/test_syntax_checks.py`.
