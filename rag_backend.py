@@ -973,9 +973,15 @@ def try_answer_syntax_question(
         return format_syntax_report(problems, checked)
 
     # Nothing unparseable. An undefined name is still the answer to "what is
-    # wrong with x.py", so report bugs; stay quiet about mere tidiness unless
-    # the user explicitly asked for a check.
-    if any(f["is_bug"] for f in quality) or _SYNTAX_EXPLICIT.search(question):
+    # wrong with x.py", so report bugs. A clean result is only worth stating
+    # when the user actually asked for a check -- explicit syntax wording, or a
+    # scan request like "scan for errors in the project". A vague "what is wrong
+    # with x.py" on a healthy file still falls through, so the model can discuss
+    # its logic instead of the app answering "nothing found".
+    asked_for_a_check = bool(
+        _SYNTAX_EXPLICIT.search(question) or _SCAN_INTENT.search(question)
+    )
+    if any(f["is_bug"] for f in quality) or asked_for_a_check:
         return format_quality_report(quality, checked)
     return None
 

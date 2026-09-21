@@ -102,14 +102,21 @@ def get_active_backend():
 
 @st.cache_resource
 def get_vectorstore(path: str, mode: str) -> tuple:
-    """Cache vectorstore to avoid re-indexing on reruns."""
+    """Cache vectorstore to avoid re-indexing on reruns.
+
+    The build duration is measured *inside* the cached function and returned, so
+    the caller reports how long indexing actually took rather than how long the
+    cache lookup took. Timing the call from outside reported a cache hit as a
+    77 ms index of twelve files, which is not a figure anyone should quote.
+    """
     from rag_backend import build_vectorstore
 
+    started = time.perf_counter()
     try:
         vs, meta = build_vectorstore(path, index_mode=mode)
-        return vs, meta, True
+        return vs, meta, True, time.perf_counter() - started
     except Exception as e:
-        return None, None, str(e)
+        return None, None, str(e), time.perf_counter() - started
 
 # Sidebar
 with st.sidebar:
@@ -211,7 +218,7 @@ with st.sidebar:
                 index_started = time.perf_counter()
                 with st.spinner("📊 Indexing codebase... This might take a minute."):
                     try:
-                        vs, meta, result = get_vectorstore(path_input, index_mode)
+                        vs, meta, result, build_seconds = get_vectorstore(path_input, index_mode)
                         if isinstance(result, bool) and result:
                             st.session_state.vs = vs
                             st.session_state.index_meta = meta
@@ -220,10 +227,20 @@ with st.sidebar:
                             st.session_state.indexing_timestamp = time.time()
                             if meta:
                                 st.session_state.indexed_files_count = len(meta.get("indexed_files", []))
+                            wall = time.perf_counter() - index_started
+                            # A wall time far below the recorded build means the
+                            # cached store was reused rather than rebuilt.
+                            from_cache = wall < build_seconds * 0.5
+                            timing = (
+                                f"reused the cached index in {format_duration(wall)} "
+                                f"(built in {format_duration(build_seconds)})"
+                                if from_cache
+                                else f"in {format_duration(build_seconds)}"
+                            )
                             st.success(
                                 f"✅ Indexed {st.session_state.indexed_files_count} file(s) for search "
                                 f"({len(meta.get('all_files', [])) if meta else 0} total in folder) "
-                                f"in {format_duration(time.perf_counter() - index_started)}."
+                                f"{timing}."
                             )
                         else:
                             st.error(f"❌ Error indexing: {result}")

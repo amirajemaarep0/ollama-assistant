@@ -576,3 +576,20 @@ def test_questions_about_error_handling_are_not_scans():
         "describe the error messages",
     ):
         assert not Q(question), question
+
+
+def test_scan_request_on_a_clean_project_reports_the_all_clear(tmp_path):
+    """Regression: "scan for errors" on a healthy project found nothing and fell
+    through to the model instead of saying so."""
+    from rag_backend import try_answer_syntax_question
+
+    (tmp_path / "a.py").write_text("def f(x):\n    return x\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("VALUE = 1\n", encoding="utf-8")
+    meta = {"root": str(tmp_path), "all_files": ["a.py", "b.py"]}
+
+    answer = try_answer_syntax_question("scan for errors in the project", str(tmp_path), meta)
+    assert answer is not None, "an explicit scan must answer, even when clean"
+    assert "No syntax errors" in answer
+
+    # A vague question about a healthy file still reaches the model.
+    assert try_answer_syntax_question("What is wrong with a.py?", str(tmp_path), meta) is None
